@@ -38,8 +38,16 @@ ruleset_name="$(json_get "$json" '.ruleset.name')"
 ruleset_id="$(json_get "$json" '.ruleset.ruleset_id')"
 integration_id="$(json_get "$json" '.ruleset.github_actions_integration_id')"
 profile="$(json_get "$json" '.ruleset.profile')"
+target_branch="$(json_get "$json" '.ruleset.target_branch')"
 [[ -z "$integration_id" ]] && integration_id=15368
 [[ -z "$ruleset_name" ]] && ruleset_name="security-scan-gates"
+
+# Default: apply to the repo's actual configured default branch. Set
+# ruleset.target_branch in config to pin a specific branch instead (e.g. a
+# scratch integration branch for a pilot on a shared repo) — the ruleset then
+# targets that literal ref, independent of what Settings > Branches says.
+ref_include="[\"~DEFAULT_BRANCH\"]"
+[[ -n "$target_branch" ]] && ref_include="[\"refs/heads/${target_branch}\"]"
 
 enforcement="disabled"
 [[ "$ENABLE" -eq 1 ]] && enforcement="active"
@@ -56,11 +64,12 @@ payload="$(jq -n \
   --arg name "$ruleset_name" \
   --arg enforcement "$enforcement" \
   --argjson checks "$checks_json" \
+  --argjson ref_include "$ref_include" \
   '{
     name: $name,
     target: "branch",
     enforcement: $enforcement,
-    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    conditions: { ref_name: { include: $ref_include, exclude: [] } },
     bypass_actors: [
       { actor_type: "OrganizationAdmin", actor_id: null, bypass_mode: "always" },
       { actor_type: "RepositoryRole", actor_id: 2, bypass_mode: "always" },

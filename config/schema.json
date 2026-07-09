@@ -36,7 +36,11 @@
         "profile": { "type": "string", "enum": ["unified-gate"] },
         "name": { "type": "string", "default": "security-scan-gates" },
         "ruleset_id": { "type": ["integer", "null"] },
-        "github_actions_integration_id": { "type": "integer", "default": 15368 }
+        "github_actions_integration_id": { "type": "integer", "default": 15368 },
+        "target_branch": {
+          "type": "string",
+          "description": "Literal branch to target instead of the repo's configured default branch (e.g. a scratch integration branch for a pilot)."
+        }
       }
     },
     "workflows": {

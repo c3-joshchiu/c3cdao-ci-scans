@@ -76,6 +76,21 @@ Injected into the caller stub → `with:` on the reusable workflow:
 | `helm_chart_path` | `helm/app` | Helm + cluster smoke |
 | `namespace` / `cluster_name` | `app-ci` | kind smoke |
 | `app_path` / `app_package` | app backend | Docker build-args |
+| `extra_build_args` | `[]` | extra `KEY=VALUE` build-args for Dockerfiles with custom base-image args |
+| `require_hardened_bases` | `true` | fail phase1-build without Chainguard/Iron Bank creds; `false` = consumer accepts its own bases |
+| `ironbank_builder_image` / `ironbank_runtime_image` | — | builder/runtime overrides used only when the Iron Bank failover tier engages |
+
+### Hardened-base registry failover (phase1-build)
+
+1. `CGR_PULL_TOKEN` set → login `cgr.dev`, Chainguard bases (primary).
+2. Else `IRONBANK_TOKEN` set → login `registry1.dso.mil` (Iron Bank), optionally
+   swapping to `ironbank_builder_image`/`ironbank_runtime_image`.
+3. Else `require_hardened_bases: false` → warn and build on the consumer's own
+   bases; otherwise fail (no silent public fallback).
+
+Consumers without a root `Makefile`/`security-helm-secctx` target get the gate's
+bundled restricted-PSS assertion in helm-check, and vuln-scan defaults empty
+`.trivyignore`/`.grype.yaml` when the consumer doesn't carry them.
 
 See `configs/examples/example-monorepo.yaml`.
 

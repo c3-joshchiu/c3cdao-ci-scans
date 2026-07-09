@@ -1,0 +1,12 @@
+# Branch protection: single aggregate gate (reusable-security-gate.yml)
+name: unified-gate
+description: One required check — Security Scan / Security Gate
+
+workflows:
+  - security-gate
+
+required_checks:
+  - Security Scan / Security Gate
+
+check_overrides:
+  Security Scan / Security Gate: security-scan / Security Gate

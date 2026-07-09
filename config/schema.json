@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/c3-joshchiu/c3cdao-ci-scans/config/schema.json",
+  "title": "Repo onboarding config",
+  "type": "object",
+  "required": ["target", "ci_scans", "ruleset", "security_gate"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "required": ["owner", "repo", "default_branch"],
+      "properties": {
+        "owner": { "type": "string" },
+        "repo": { "type": "string" },
+        "default_branch": { "type": "string", "default": "main" },
+        "trunk_branches": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "local_path": { "type": "string" }
+      }
+    },
+    "ci_scans": {
+      "type": "object",
+      "required": ["owner", "repo", "ref"],
+      "properties": {
+        "owner": { "type": "string" },
+        "repo": { "type": "string" },
+        "ref": { "type": "string", "default": "main" }
+      }
+    },
+    "ruleset": {
+      "type": "object",
+      "required": ["profile"],
+      "properties": {
+        "profile": { "type": "string", "enum": ["unified-gate"] },
+        "name": { "type": "string", "default": "security-scan-gates" },
+        "ruleset_id": { "type": ["integer", "null"] },
+        "github_actions_integration_id": { "type": "integer", "default": 15368 }
+      }
+    },
+    "workflows": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["security-gate"] },
+          "default": ["security-gate"]
+        }
+      }
+    },
+    "security_gate": {
+      "type": "object",
+      "properties": {
+        "scan_image": { "type": "string", "default": "app:local" },
+        "dockerfile": {
+          "type": "string",
+          "default": "containers/backend/Dockerfile"
+        },
+        "builder_image": { "type": "string", "default": "cgr.dev/chainguard/python:latest-dev" },
+        "runtime_image": { "type": "string", "default": "cgr.dev/chainguard/python:latest" },
+        "runtime_apks": { "type": "string", "default": "" },
+        "helm_chart_path": { "type": "string", "default": "helm/app" },
+        "helm_values_file": { "type": "string", "default": "helm/app/values.yaml" },
+        "helm_values_local_file": {
+          "type": "string",
+          "default": "helm/app/values-local.yaml"
+        },
+        "helm_release_name": { "type": "string", "default": "app-ci" },
+        "cluster_name": { "type": "string", "default": "app-ci" },
+        "namespace": { "type": "string", "default": "app-ci" },
+        "secctx_make_target": { "type": "string", "default": "security-helm-secctx" },
+        "app_path": { "type": "string", "default": "apps/app/backend" },
+        "app_package": { "type": "string", "default": "app-backend" },
+        "app_module": { "type": "string", "default": "app.main:app" },
+        "app_port": { "type": "string", "default": "8000" }
+      }
+    }
+  }
+}

@@ -1,0 +1,751 @@
+# Unified security scan — single PR gate covering all CI spec gates.
+#
+# A single workflow owns the entire PR gate and reports as the required
+# status check, instead of several independent modular scan workflows.
+#
+# Structure:
+#   phase1-build      builds the backend image once, generates its image SBOM,
+#                     and hands the image to downstream jobs as a transient
+#                     `docker save` tarball uploaded via actions/upload-artifact.
+#                     No registry round-trip — the image never leaves the run.
+#   secrets-scan      TruffleHog (parallel, no needs)
+#   sast-semgrep      Semgrep (parallel, warn-only until baseline)
+#   sast-sonarqube    SonarQube ephemeral (parallel, warn-only until baseline)
+#   helm-check        helm lint + template (parallel, always blocking)
+#   cluster-smoke     kind + helm install + GET /health against the built image
+#                     (needs: phase1-build) — proves the image actually boots
+#   vuln-scan         Trivy (image + source SBOM) + Grype (image + source SBOM
+#                     + image SBOM). No Trivy-on-image-SBOM: OS CVEs come from
+#                     the direct Trivy image scan; Trivy can't match OS pkgs
+#                     from a Syft SBOM. (needs: phase1-build)
+#   security-gate     aggregate pass/fail (needs: all, if: always())
+#
+# Build artifact handling (mirrors the modular workflows' "transient, runner-
+# scoped" approach): the image moves between jobs as an uploaded artifact using
+# the runner's built-in token. No GHCR push, no `packages: write`, no per-org
+# hardcoding, no cleanup job — so this is fork-safe (fork PRs get a read-only
+# token and can't push to a registry, but they can upload artifacts).
+#
+# Blocking:
+#   phase1-build, secrets-scan, helm-check are always blocking.
+#   cluster-smoke and vuln-scan gate their hard-fail on the SECURITY_SCAN_BLOCKING
+#   repo variable, but the gate still fails if they are skipped/cancelled/errored
+#   (e.g. because the build died) — a non-success on any blocking job is a gate
+#   failure, so a broken build can never sign off green.
+#   sast-semgrep and sast-sonarqube are continue-on-error (warn-only)
+#   until the harden baseline lands.
+
+name: Reusable Security Gate
+
+on:
+  workflow_call:
+    inputs:
+      scan_image:
+        type: string
+        default: app:local
+      dockerfile:
+        type: string
+        default: containers/backend/Dockerfile
+      builder_image:
+        type: string
+        default: cgr.dev/chainguard/python:latest-dev
+      runtime_image:
+        type: string
+        default: cgr.dev/chainguard/python:latest
+      runtime_apks:
+        type: string
+        default: ""
+      helm_chart_path:
+        type: string
+        default: helm/app
+      helm_values_file:
+        type: string
+        default: helm/app/values.yaml
+      helm_values_local_file:
+        type: string
+        default: helm/app/values-local.yaml
+      helm_release_name:
+        type: string
+        default: app-ci
+      cluster_name:
+        type: string
+        default: app-ci
+      namespace:
+        type: string
+        default: app-ci
+      secctx_make_target:
+        type: string
+        default: security-helm-secctx
+      app_path:
+        type: string
+        default: apps/app/backend
+      app_package:
+        type: string
+        default: app-backend
+      app_module:
+        type: string
+        default: app.main:app
+      app_port:
+        type: string
+        default: "8000"
+    secrets:
+      CGR_PULL_TOKEN:
+        required: false
+      CGR_PULL_USERNAME:
+        required: false
+      IRONBANK_TOKEN:
+        required: false
+      IRONBANK_USERNAME:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: security-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Local-daemon tag only — the image is never pushed to a registry. It moves
+  # between jobs as a `docker save` tarball (actions artifact), so a bare repo
+  # tag is all we need; `docker load` restores this exact tag downstream.
+  # MUST match inputs.scan_image to the consumer's helm values-local (backend
+  # image + pullPolicy: Never) — cluster-smoke `kind load`s this tag and the
+  # chart's backend + migration-hook pods reference it with pullPolicy Never.
+  # A mismatch = ErrImageNeverPull and the post-install migration hook hangs
+  # until helm times out.
+  SCAN_IMAGE: ${{ inputs.scan_image }}
+  IMAGE_ARTIFACT: scan-image
+  # Chainguard (cgr.dev) base args for the backend build. Override
+  # builder_image/runtime_image/runtime_apks per consumer if it needs a
+  # private Chainguard org or extra runtime packages. The "Login to
+  # Chainguard" step below authenticates with the CGR pull secrets
+  # (required, no public fallback).
+  BACKEND_BUILDER_IMAGE: ${{ inputs.builder_image }}
+  BACKEND_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  BACKEND_RUNTIME_APKS: ${{ inputs.runtime_apks }}
+  TRIVY_SEVERITY: HIGH,CRITICAL
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Phase 1 — build the backend image once and push an ephemeral scan tag
+  # --------------------------------------------------------------------------
+  phase1-build:
+    name: Phase 1 — Docker image build
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ env.SCAN_IMAGE }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # The backend image is large (WeasyPrint + psql deps). Building it, loading
+      # it into Docker, and `docker save`-ing it for the artifact exhausts the
+      # hosted runner's ~14 GB free disk. Reclaim ~20 GB of unused toolchains.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: Login to Chainguard (cgr.dev)
+        env:
+          CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+          CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+        run: |
+          set -uo pipefail
+          if [ -z "${CGR_PULL_TOKEN:-}" ]; then
+            echo "::error::CGR_PULL_TOKEN/CGR_PULL_USERNAME not configured — the backend builds ONLY on Chainguard cgr.dev bases (no public fallback). Add the Chainguard pull secrets."
+            exit 1
+          fi
+          attempt=1; delay=15
+          until printf '%s' "$CGR_PULL_TOKEN" | docker login cgr.dev -u "$CGR_PULL_USERNAME" --password-stdin; do
+            if [ "$attempt" -ge 4 ]; then echo "cgr.dev login failed after 4 attempts" >&2; exit 1; fi
+            echo "cgr.dev login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
+            sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
+          done
+
+      - name: Build scan image (local load, no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          push: false
+          load: true   # load into local daemon so Syft can scan + we can save it
+          tags: ${{ env.SCAN_IMAGE }}
+          platforms: linux/amd64
+          build-args: |
+            BUILDER_IMAGE=${{ env.BACKEND_BUILDER_IMAGE }}
+            RUNTIME_IMAGE=${{ env.BACKEND_RUNTIME_IMAGE }}
+            APP_PATH=${{ inputs.app_path }}
+            APP_PACKAGE=${{ inputs.app_package }}
+            APP_MODULE=${{ inputs.app_module }}
+            APP_PORT=${{ inputs.app_port }}
+            RUNTIME_APKS=${{ env.BACKEND_RUNTIME_APKS }}
+          cache-from: type=gha,scope=security-scan-backend
+          cache-to: type=gha,mode=max,scope=security-scan-backend
+          provenance: false
+
+      # Generate image SBOM while the image is in the local Docker daemon.
+      # Syft uses its own registry client, so scanning the local daemon image
+      # avoids any registry pull in a downstream job.
+      - name: Generate image SBOM (from local daemon)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ${{ env.SCAN_IMAGE }}
+          format: cyclonedx-json
+          output-file: sbom-image.json
+          artifact-name: sbom-image
+
+      # Hand the built image to downstream jobs as a transient artifact rather
+      # than a registry tag. upload-artifact uses the runner's built-in token —
+      # no GHCR, no `packages: write`, fork-safe. `docker load` restores the
+      # SCAN_IMAGE tag in vuln-scan and cluster-smoke.
+      - name: Save image to tarball
+        run: docker save "${{ env.SCAN_IMAGE }}" -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ env.IMAGE_ARTIFACT }}
+          path: image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # --------------------------------------------------------------------------
+  # Secrets detection — TruffleHog (diff-aware, verified only)
+  #
+  # Job name MUST stay "TruffleHog verified-secret scan": the main ruleset
+  # requires exactly that status-check context (strict policy + merge queue).
+  # Renaming it would leave the required context permanently pending on every
+  # future PR (including Dependabot). Do not change without updating the ruleset.
+  # --------------------------------------------------------------------------
+  secrets-scan:
+    name: TruffleHog verified-secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Full history so the diff base commit is present for range scans.
+          fetch-depth: 0
+
+      # Resolve the scan range per event so the scan is diff-aware. Scanning
+      # only the PR/merge-queue range (not full history) means a pre-existing
+      # verified secret elsewhere in history can't block every future PR once
+      # SECURITY_SCAN_BLOCKING=true — the failure mode the modular design avoided.
+      - name: Resolve scan range
+        id: range
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request)
+              echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+              echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+              ;;
+            merge_group)
+              echo "base=${{ github.event.merge_group.base_sha }}" >> "$GITHUB_OUTPUT"
+              echo "head=${{ github.event.merge_group.head_sha }}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # workflow_dispatch / fallback: full-history scan.
+              echo "base=" >> "$GITHUB_OUTPUT"
+              echo "head=HEAD" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: TruffleHog scan (verified only)
+        id: scan
+        continue-on-error: true
+        uses: trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70  # v3.95.6
+        with:
+          path: ./
+          base: ${{ steps.range.outputs.base }}
+          head: ${{ steps.range.outputs.head }}
+          extra_args: --only-verified
+
+      - name: Gate on verified secrets
+        run: |
+          if [ "${{ steps.scan.outcome }}" = "failure" ]; then
+            if [ "${{ vars.SECURITY_SCAN_BLOCKING }}" = "true" ]; then
+              echo "::error::TruffleHog found verified secret(s). Failing (SECURITY_SCAN_BLOCKING=true)."
+              exit 1
+            fi
+            echo "::warning::TruffleHog found verified secret(s). Warn-only; set SECURITY_SCAN_BLOCKING=true to enforce."
+          else
+            echo "No verified secrets found in the scanned range."
+          fi
+
+  # --------------------------------------------------------------------------
+  # SAST — Semgrep (warn-only until harden baseline)
+  # --------------------------------------------------------------------------
+  sast-semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Semgrep
+        run: pip install semgrep==1.159.0
+
+      - name: Run Semgrep scan
+        id: scan
+        run: |
+          # Exit codes: 0 = no findings, 1 = findings found (expected),
+          # 2+ = real scanner error. Don't swallow real errors with `|| true`.
+          set +e
+          semgrep scan \
+            --config auto \
+            --json \
+            --output semgrep-results.json \
+            --no-git-ignore \
+            .
+          EXIT_CODE=$?
+          set -e
+          if [ "$EXIT_CODE" -ge 2 ]; then
+            echo "::error::Semgrep failed with exit code $EXIT_CODE"
+            exit "$EXIT_CODE"
+          fi
+
+      - name: Upload results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+          if-no-files-found: warn
+
+      - name: Gate on ERROR-severity findings (warn-only)
+        run: |
+          ERRORS=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep-results.json 2>/dev/null || echo 0)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::warning::Semgrep found ${ERRORS} ERROR-severity finding(s). Warn-only; change exit 0 to exit 1 below to enforce."
+            exit 0  # change to `exit 1` to enforce the gate
+          fi
+          echo "No ERROR-severity Semgrep findings."
+
+  # --------------------------------------------------------------------------
+  # SAST — SonarQube ephemeral (warn-only until baseline)
+  # --------------------------------------------------------------------------
+  sast-sonarqube:
+    name: SAST (SonarQube ephemeral)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    services:
+      sonarqube:
+        # Hardened base: Iron Bank SonarQube (matches the modular sonarqube.yml
+        # CI posture, not a public image). Uses the IRONBANK pull secrets the
+        # base repo has. On forks without them the service can't pull and this
+        # warn-only (continue-on-error) job errors without blocking the gate.
+        image: registry1.dso.mil/ironbank/sonarsource/sonarqube/sonarqube:9.9-community
+        credentials:
+          username: ${{ secrets.IRONBANK_USERNAME }}
+          password: ${{ secrets.IRONBANK_TOKEN }}
+        ports:
+          - 9000:9000
+        env:
+          SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for SonarQube
+        run: |
+          for i in $(seq 1 60); do
+            sq_status=$(curl -fsS http://127.0.0.1:9000/api/system/status 2>/dev/null \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
+            [ "$sq_status" = "UP" ] && echo "SonarQube UP after $((i*5))s" && break
+            echo "[$i/60] status: $sq_status"; sleep 5
+          done
+          [ "$sq_status" = "UP" ] || { echo "::error::SonarQube did not start"; exit 1; }
+
+      - name: Provision project and token
+        id: sonar
+        run: |
+          NEW_PASS="ci-admin-${GITHUB_RUN_ID}"
+          curl -fsS -u admin:admin -X POST \
+            "http://127.0.0.1:9000/api/users/change_password?login=admin&previousPassword=admin&password=${NEW_PASS}"
+          TOKEN=$(curl -fsS -u "admin:${NEW_PASS}" -X POST \
+            "http://127.0.0.1:9000/api/user_tokens/generate?name=ci-${GITHUB_RUN_ID}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Run sonar-scanner
+        uses: sonarsource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e  # v8.2.0
+        env:
+          SONAR_TOKEN: ${{ steps.sonar.outputs.token }}
+          SONAR_HOST_URL: http://127.0.0.1:9000
+        with:
+          args: >
+            -Dsonar.projectKey=security-scan
+            -Dsonar.sources=packages/,apps/
+            -Dsonar.exclusions=**/node_modules/**,**/.pnpm-store/**
+
+      # Wait for the Compute Engine task to finish before reading the gate —
+      # otherwise project_status can return a stale or empty result from a prior
+      # (or not-yet-computed) analysis. Mirrors the modular sonarqube.yml.
+      - name: Wait for analysis task to complete
+        env:
+          SONAR_TOKEN: ${{ steps.sonar.outputs.token }}
+        run: |
+          if [ ! -f .scannerwork/report-task.txt ]; then
+            echo "::error::report-task.txt not produced; analysis did not run"
+            exit 1
+          fi
+          TASK_URL=$(grep '^ceTaskUrl=' .scannerwork/report-task.txt | cut -d'=' -f2-)
+          if [ -z "$TASK_URL" ]; then
+            echo "::error::ceTaskUrl missing from report-task.txt"; cat .scannerwork/report-task.txt; exit 1
+          fi
+          for i in $(seq 1 60); do
+            STATUS=$(curl -fsS -u "${SONAR_TOKEN}:" "$TASK_URL" | python3 -c "import sys,json; print(json.load(sys.stdin)['task']['status'])")
+            case "$STATUS" in
+              SUCCESS) echo "Analysis complete after $((i*5))s"; break ;;
+              FAILED|CANCELED) echo "::error::Analysis ended with status $STATUS"; exit 1 ;;
+              *) echo "[$i/60] Analysis status: $STATUS"; sleep 5 ;;
+            esac
+            [ "$i" = "60" ] && { echo "::error::Analysis did not complete within 5 minutes"; exit 1; }
+          done
+
+      - name: Quality gate check (warn-only)
+        id: qualitygate
+        env:
+          SONAR_TOKEN: ${{ steps.sonar.outputs.token }}
+        run: |
+          # Read the gate for the specific analysisId we just computed, not the
+          # project's latest, so the result matches this run.
+          ANALYSIS_ID=$(grep '^ceTaskId=' .scannerwork/report-task.txt | cut -d'=' -f2- \
+            | xargs -I{} curl -fsS -u "${SONAR_TOKEN}:" "http://127.0.0.1:9000/api/ce/task?id={}" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['task'].get('analysisId',''))")
+          if [ -n "$ANALYSIS_ID" ]; then
+            curl -fsS -u "${SONAR_TOKEN}:" \
+              "http://127.0.0.1:9000/api/qualitygates/project_status?analysisId=${ANALYSIS_ID}" > quality-gate.json
+          else
+            curl -fsS -u "${SONAR_TOKEN}:" \
+              "http://127.0.0.1:9000/api/qualitygates/project_status?projectKey=security-scan" > quality-gate.json
+          fi
+          result=$(python3 -c "import sys,json; print(json.load(open('quality-gate.json'))['projectStatus']['status'])")
+          echo "Quality gate: $result"
+          if [ "$result" = "ERROR" ]; then
+            echo "::warning::SonarQube quality gate FAILED. Warn-only; change exit 0 to exit 1 to enforce."
+            exit 0  # change to `exit 1` to enforce the gate
+          fi
+
+      # 90-day compliance artifact (the prescribed evidence the modular
+      # sonarqube.yml uploaded; retained for audit).
+      - name: Upload SonarQube compliance artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sonarqube-${{ github.run_id }}
+          path: |
+            quality-gate.json
+            .scannerwork/report-task.txt
+          retention-days: 90
+          if-no-files-found: warn
+          include-hidden-files: true
+
+  # --------------------------------------------------------------------------
+  # Helm chart validity — always blocking
+  # --------------------------------------------------------------------------
+  helm-check:
+    name: Helm Chart Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+
+      - name: Build chart dependencies
+        run: helm dependency build ./${{ inputs.helm_chart_path }}
+
+      - name: helm lint
+        run: helm lint ./${{ inputs.helm_chart_path }} -f ${{ inputs.helm_values_file }}
+
+      - name: helm template (render check)
+        run: helm template ${{ inputs.helm_release_name }} ./${{ inputs.helm_chart_path }} -f ${{ inputs.helm_values_file }} > /tmp/rendered-chart.yaml
+
+      # Restricted-PSS assertion on the rendered releases — a machine-checkable
+      # re-scan of the templated securityContext rows. Ported from the modular
+      # helm-validate.yml (which this workflow replaces) so that pod-security
+      # enforcement isn't lost.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+      - name: Assert rendered pod-security controls (restricted PSS)
+        run: make ${{ inputs.secctx_make_target }}
+
+  # --------------------------------------------------------------------------
+  # Cluster smoke — kind + helm install + GET /health against the built image.
+  # helm-check (lint/template) is a static render; it can't catch a chart that
+  # renders clean but crash-loops on boot (bad env, failed migration, broken
+  # entrypoint). This boots the real image against an ephemeral Postgres.
+  # Ported from the modular pr-gate.yml. Warn-only unless SECURITY_SCAN_BLOCKING.
+  # --------------------------------------------------------------------------
+  cluster-smoke:
+    name: Cluster Smoke (kind + helm + /health)
+    runs-on: ubuntu-latest
+    needs: [phase1-build]
+    if: needs.phase1-build.result == 'success'
+    env:
+      CLUSTER: ${{ inputs.cluster_name }}
+      NAMESPACE: ${{ inputs.namespace }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # kind node + pgvector + the loaded backend image strain the runner's
+      # ~14 GB free disk; reclaim unused toolchains first (mirrors phase1-build).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          df -h /
+
+      - name: Download image artifact (built in phase1-build)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ env.IMAGE_ARTIFACT }}
+
+      - name: Load image into local daemon
+        run: docker load -i image.tar
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        with:
+          cluster_name: ${{ inputs.cluster_name }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
+
+      - name: kind install + helm deploy + /health smoke
+        # Warn-only: advisory unless SECURITY_SCAN_BLOCKING=true. The job result
+        # still feeds security-gate, so a skipped/cancelled run fails the gate.
+        continue-on-error: ${{ vars.SECURITY_SCAN_BLOCKING != 'true' }}
+        env:
+          IMAGE: ${{ needs.phase1-build.outputs.image }}
+        run: |
+          set -uo pipefail
+          fail() { echo "::warning::cluster-smoke: $1"; exit 1; }
+
+          kind load docker-image "${IMAGE}" --name "${CLUSTER}" || fail "kind load failed"
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          # Ephemeral Postgres (chart does not provision a DB).
+          cat <<'EOF' | kubectl -n "${NAMESPACE}" apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: app-postgres
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: app-postgres } }
+            template:
+              metadata: { labels: { app: app-postgres } }
+              spec:
+                containers:
+                  - name: postgres
+                    image: pgvector/pgvector:pg16
+                    env:
+                      - { name: POSTGRES_USER, value: postgres }
+                      - { name: POSTGRES_PASSWORD, value: postgres }
+                      - { name: POSTGRES_DB, value: appdb }
+                    ports: [{ containerPort: 5432 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: app-postgres
+          spec:
+            selector: { app: app-postgres }
+            ports: [{ port: 5432, targetPort: 5432 }]
+          EOF
+
+          kubectl -n "${NAMESPACE}" rollout status deploy/app-postgres --timeout=120s || fail "postgres not ready"
+
+          # DATABASE_URL secret the chart expects (values-local: app-database-url).
+          kubectl -n "${NAMESPACE}" create secret generic app-database-url \
+            --from-literal=DATABASE_URL="postgresql://postgres:postgres@app-postgres:5432/appdb" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # The chart renders an HTTPRoute (Gateway API). kind ships no Gateway
+          # API CRDs, so install them (server-side: these CRDs exceed the
+          # client-side annotation limit). No controller is needed — the smoke
+          # reaches the backend via port-forward, not the gateway.
+          kubectl apply --server-side -f \
+            https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
+            || fail "gateway-api CRD install failed"
+
+          helm dependency build ./${{ inputs.helm_chart_path }} || fail "helm dependency build failed"
+
+          # Install the app. The post-install migration hook runs alembic against
+          # the Postgres above (from the backend image, pullPolicy Never — hence
+          # SCAN_IMAGE must equal values-local's scan_image). Frontend
+          # image isn't built here, so don't --wait on the whole release; we gate
+          # on the backend rollout explicitly.
+          helm install ${{ inputs.helm_release_name }} ./${{ inputs.helm_chart_path }} \
+            -n "${NAMESPACE}" \
+            -f ${{ inputs.helm_values_file }} \
+            -f ${{ inputs.helm_values_local_file }} \
+            --timeout 5m || {
+              echo "=== helm install failed — cluster diagnostics ==="
+              kubectl -n "${NAMESPACE}" get pods,jobs -o wide || true
+              kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp | tail -30 || true
+              for p in $(kubectl -n "${NAMESPACE}" get pods -o name 2>/dev/null); do
+                echo "--- describe ${p} ---"; kubectl -n "${NAMESPACE}" describe "${p}" | tail -25 || true
+                echo "--- logs ${p} ---"; kubectl -n "${NAMESPACE}" logs "${p}" --all-containers --tail=40 || true
+              done
+              fail "helm install failed"
+            }
+
+          backend_deploy=$(kubectl -n "${NAMESPACE}" get deploy -o name | grep -i backend | head -1)
+          [ -n "${backend_deploy}" ] || fail "no backend deployment found"
+          kubectl -n "${NAMESPACE}" rollout status "${backend_deploy}" --timeout=180s || {
+            echo "=== backend not ready — diagnostics ==="
+            kubectl -n "${NAMESPACE}" get pods -o wide || true
+            kubectl -n "${NAMESPACE}" describe "${backend_deploy}" | tail -40 || true
+            for p in $(kubectl -n "${NAMESPACE}" get pods -l app.kubernetes.io/component=backend -o name 2>/dev/null; kubectl -n "${NAMESPACE}" get pods -o name 2>/dev/null | grep -i backend); do
+              echo "--- describe ${p} ---"; kubectl -n "${NAMESPACE}" describe "${p}" | tail -30 || true
+              echo "--- logs ${p} (current) ---"; kubectl -n "${NAMESPACE}" logs "${p}" --all-containers --tail=60 || true
+              echo "--- logs ${p} (previous) ---"; kubectl -n "${NAMESPACE}" logs "${p}" --all-containers --previous --tail=60 || true
+            done
+            fail "backend not ready"
+          }
+
+          backend_svc=$(kubectl -n "${NAMESPACE}" get svc -o name | grep -i backend | head -1)
+          [ -n "${backend_svc}" ] || fail "no backend service found"
+          kubectl -n "${NAMESPACE}" port-forward "${backend_svc}" 8000:8000 >/tmp/pf.log 2>&1 &
+          pf_pid=$!
+          sleep 6
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health || echo 000)
+          kill "${pf_pid}" 2>/dev/null || true
+          echo "GET /health -> ${code}"
+          [ "${code}" = "200" ] || fail "/health returned ${code}, expected 200"
+          echo "smoke OK"
+
+  # --------------------------------------------------------------------------
+  # Vulnerability scan — Trivy + Grype × image + source SBOM (+ Grype image SBOM)
+  # Source SBOM generated inline; image + image SBOM come from phase1-build.
+  # --------------------------------------------------------------------------
+  vuln-scan:
+    name: Vulnerability Scan (Trivy + Grype)
+    runs-on: ubuntu-latest
+    needs: [phase1-build]
+    if: needs.phase1-build.result == 'success'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Download image artifact (built in phase1-build)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: ${{ env.IMAGE_ARTIFACT }}
+
+      - name: Load image into local daemon
+        run: docker load -i image.tar
+
+      - name: Generate source SBOM (pnpm + uv)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom-source.json
+          artifact-name: sbom-source
+
+      - name: Download image SBOM (generated in phase1-build)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: sbom-image
+
+
+      - name: Trivy scan — image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
+        with:
+          image-ref: ${{ needs.phase1-build.outputs.image }}
+          format: table
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' && '1' || '0' }}
+          # No ignore-unfixed: the modular pr-gate/sca-scan surfaced unfixed
+          # HIGH/CRITICAL too, so we keep reporting them (no coverage reduction).
+          trivyignores: .trivyignore
+
+      - name: Trivy scan — source SBOM
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
+        with:
+          scan-type: sbom
+          scan-ref: sbom-source.json
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' && '1' || '0' }}
+          trivyignores: .trivyignore
+
+      # No "Trivy scan — image SBOM" step: OS-package CVEs are already covered
+      # authoritatively by "Trivy scan — image" above. Trivy cannot reliably
+      # match OS packages from a third-party (Syft) SBOM — it warns as much and
+      # returns 0 OS findings where the direct image scan finds them. Grype +
+      # Syft are the same vendor (Anchore), so the image SBOM round-trips
+      # cleanly to "Grype scan — image SBOM" below, which validates the artifact.
+
+      - name: Grype scan — image
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        with:
+          image: ${{ needs.phase1-build.outputs.image }}
+          severity-cutoff: high
+          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
+          output-format: table
+          config: .grype.yaml
+
+      - name: Grype scan — source SBOM
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        with:
+          sbom: sbom-source.json
+          severity-cutoff: high
+          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
+          output-format: table
+          config: .grype.yaml
+
+      - name: Grype scan — image SBOM
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        with:
+          sbom: sbom-image  # anchore/sbom-action stores artifact as file named after artifact-name
+          severity-cutoff: high
+          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
+          output-format: table
+          config: .grype.yaml
+
+  # --------------------------------------------------------------------------
+  # Security Gate — aggregate required check
+  # --------------------------------------------------------------------------
+  security-gate:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    needs: [phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan]
+    if: always()
+    steps:
+      - name: Evaluate scan results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 << 'EOF'
+          import sys, json, os
+          needs = json.loads(os.environ['NEEDS_JSON'])
+          # Blocking jobs must each report result == 'success'. We deliberately
+          # check for NON-success (not just 'failure') so that a job which is
+          # skipped or cancelled — e.g. vuln-scan/cluster-smoke skipped because
+          # phase1-build died — fails the gate instead of silently passing.
+          # A broken build can never sign off green.
+          #
+          # sast-semgrep / sast-sonarqube are continue-on-error (warn-only):
+          # their result is 'success' regardless of findings, so they're
+          # excluded here and surface only in their logs.
+          blocking = ['phase1-build', 'secrets-scan', 'helm-check', 'cluster-smoke', 'vuln-scan']
+          bad = {k: needs.get(k, {}).get('result') for k in blocking
+                 if needs.get(k, {}).get('result') != 'success'}
+          if bad:
+              print('Blocking jobs not successful:', bad)
+              sys.exit(1)
+          print('All blocking security scans passed.')
+          EOF

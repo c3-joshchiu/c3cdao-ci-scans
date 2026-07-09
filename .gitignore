@@ -1,0 +1,13 @@
+# Centralized security scan workflows + repo onboarding tooling.
+#
+# Consumer repos get thin caller stubs that invoke reusable workflows from
+# this repo. Branch protection is applied via a dedicated ruleset driven by
+# config profiles.
+
+.DS_Store
+/tmp/
+*.before.json
+*.after.json
+/configs/local/
+/.handoff/
+/.vscode/

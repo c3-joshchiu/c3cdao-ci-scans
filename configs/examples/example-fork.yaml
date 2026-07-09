@@ -1,0 +1,31 @@
+# Example: onboard a fork of a shared template repo — adjust owner/repo/local_path
+target:
+  owner: your-org
+  repo: your-fork
+  default_branch: main
+  trunk_branches:
+    - main
+  local_path: ../your-fork
+
+ci_scans:
+  owner: your-org
+  repo: c3cdao-ci-scans
+  ref: main
+
+ruleset:
+  profile: unified-gate
+  name: security-scan-gates
+
+workflows:
+  enabled:
+    - security-gate
+
+security_gate:
+  scan_image: app:local
+  dockerfile: containers/backend/Dockerfile
+  helm_chart_path: helm/app
+  helm_values_file: helm/app/values.yaml
+  helm_values_local_file: helm/app/values-local.yaml
+  helm_release_name: app-ci
+  cluster_name: app-ci
+  namespace: app-ci

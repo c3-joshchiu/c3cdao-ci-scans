@@ -3,40 +3,89 @@
   "$id": "https://github.com/c3-joshchiu/c3cdao-ci-scans/config/schema.json",
   "title": "Repo onboarding config",
   "type": "object",
-  "required": ["target", "ci_scans", "ruleset", "security_gate"],
+  "required": [
+    "target",
+    "ci_scans",
+    "ruleset",
+    "security_gate"
+  ],
   "properties": {
     "target": {
       "type": "object",
-      "required": ["owner", "repo", "default_branch"],
+      "required": [
+        "owner",
+        "repo",
+        "default_branch"
+      ],
       "properties": {
-        "owner": { "type": "string" },
-        "repo": { "type": "string" },
-        "default_branch": { "type": "string", "default": "main" },
+        "owner": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "default_branch": {
+          "type": "string",
+          "default": "main"
+        },
         "trunk_branches": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "minItems": 1
         },
-        "local_path": { "type": "string" }
+        "local_path": {
+          "type": "string"
+        }
       }
     },
     "ci_scans": {
       "type": "object",
-      "required": ["owner", "repo", "ref"],
+      "required": [
+        "owner",
+        "repo",
+        "ref"
+      ],
       "properties": {
-        "owner": { "type": "string" },
-        "repo": { "type": "string" },
-        "ref": { "type": "string", "default": "main" }
+        "owner": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string",
+          "default": "main"
+        }
       }
     },
     "ruleset": {
       "type": "object",
-      "required": ["profile"],
+      "required": [
+        "profile"
+      ],
       "properties": {
-        "profile": { "type": "string", "enum": ["unified-gate"] },
-        "name": { "type": "string", "default": "security-scan-gates" },
-        "ruleset_id": { "type": ["integer", "null"] },
-        "github_actions_integration_id": { "type": "integer", "default": 15368 },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "unified-gate"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "default": "security-scan-gates"
+        },
+        "ruleset_id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "github_actions_integration_id": {
+          "type": "integer",
+          "default": 15368
+        },
         "target_branch": {
           "type": "string",
           "description": "Literal branch to target instead of the repo's configured default branch (e.g. a scratch integration branch for a pilot)."
@@ -48,36 +97,110 @@
       "properties": {
         "enabled": {
           "type": "array",
-          "items": { "type": "string", "enum": ["security-gate"] },
-          "default": ["security-gate"]
+          "items": {
+            "type": "string",
+            "enum": [
+              "security-gate"
+            ]
+          },
+          "default": [
+            "security-gate"
+          ]
         }
       }
     },
     "security_gate": {
       "type": "object",
       "properties": {
-        "scan_image": { "type": "string", "default": "app:local" },
+        "scan_image": {
+          "type": "string",
+          "default": "app:local"
+        },
         "dockerfile": {
           "type": "string",
           "default": "containers/backend/Dockerfile"
         },
-        "builder_image": { "type": "string", "default": "cgr.dev/chainguard/python:latest-dev" },
-        "runtime_image": { "type": "string", "default": "cgr.dev/chainguard/python:latest" },
-        "runtime_apks": { "type": "string", "default": "" },
-        "helm_chart_path": { "type": "string", "default": "helm/app" },
-        "helm_values_file": { "type": "string", "default": "helm/app/values.yaml" },
+        "builder_image": {
+          "type": "string",
+          "default": "cgr.dev/chainguard/python:latest-dev"
+        },
+        "runtime_image": {
+          "type": "string",
+          "default": "cgr.dev/chainguard/python:latest"
+        },
+        "runtime_apks": {
+          "type": "string",
+          "default": ""
+        },
+        "helm_chart_path": {
+          "type": "string",
+          "default": "helm/app"
+        },
+        "helm_values_file": {
+          "type": "string",
+          "default": "helm/app/values.yaml"
+        },
         "helm_values_local_file": {
           "type": "string",
           "default": "helm/app/values-local.yaml"
         },
-        "helm_release_name": { "type": "string", "default": "app-ci" },
-        "cluster_name": { "type": "string", "default": "app-ci" },
-        "namespace": { "type": "string", "default": "app-ci" },
-        "secctx_make_target": { "type": "string", "default": "security-helm-secctx" },
-        "app_path": { "type": "string", "default": "apps/app/backend" },
-        "app_package": { "type": "string", "default": "app-backend" },
-        "app_module": { "type": "string", "default": "app.main:app" },
-        "app_port": { "type": "string", "default": "8000" }
+        "helm_release_name": {
+          "type": "string",
+          "default": "app-ci"
+        },
+        "cluster_name": {
+          "type": "string",
+          "default": "app-ci"
+        },
+        "namespace": {
+          "type": "string",
+          "default": "app-ci"
+        },
+        "secctx_make_target": {
+          "type": "string",
+          "default": "security-helm-secctx"
+        },
+        "app_path": {
+          "type": "string",
+          "default": "apps/app/backend"
+        },
+        "app_package": {
+          "type": "string",
+          "default": "app-backend"
+        },
+        "app_module": {
+          "type": "string",
+          "default": "app.main:app"
+        },
+        "app_port": {
+          "type": "string",
+          "default": "8000"
+        },
+        "extra_build_args": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*="
+          },
+          "description": "Extra KEY=VALUE Docker build-args appended to the gate defaults (for Dockerfiles with custom base-image args)"
+        },
+        "require_hardened_bases": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fail phase1-build when neither Chainguard nor Iron Bank credentials are configured (set false to build on consumer-specified bases)"
+        },
+        "ironbank_registry": {
+          "type": "string",
+          "default": "registry1.dso.mil"
+        },
+        "ironbank_builder_image": {
+          "type": "string",
+          "description": "Builder image override used only when the Iron Bank failover tier engages"
+        },
+        "ironbank_runtime_image": {
+          "type": "string",
+          "description": "Runtime image override used only when the Iron Bank failover tier engages"
+        }
       }
     }
   }

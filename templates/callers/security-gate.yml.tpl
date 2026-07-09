@@ -39,3 +39,8 @@ jobs:
       app_package: {{APP_PACKAGE}}
       app_module: {{APP_MODULE}}
       app_port: "{{APP_PORT}}"
+      require_hardened_bases: {{REQUIRE_HARDENED_BASES}}
+      ironbank_builder_image: "{{IRONBANK_BUILDER_IMAGE}}"
+      ironbank_runtime_image: "{{IRONBANK_RUNTIME_IMAGE}}"
+      extra_build_args: |
+        {{EXTRA_BUILD_ARGS}}

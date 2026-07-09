@@ -51,7 +51,11 @@ rendered="$(render_template "$ROOT/templates/callers/security-gate.yml.tpl" \
   "APP_PATH" "$(sg '.security_gate.app_path // "apps/app/backend"')" \
   "APP_PACKAGE" "$(sg '.security_gate.app_package // "app-backend"')" \
   "APP_MODULE" "$(sg '.security_gate.app_module // "app.main:app"')" \
-  "APP_PORT" "$(sg '.security_gate.app_port // "8000"')" )"
+  "APP_PORT" "$(sg '.security_gate.app_port // "8000"')" \
+  "REQUIRE_HARDENED_BASES" "$(echo "$json" | jq -r '.security_gate.require_hardened_bases | if . == null then true else . end')" \
+  "IRONBANK_BUILDER_IMAGE" "$(sg '.security_gate.ironbank_builder_image // ""')" \
+  "IRONBANK_RUNTIME_IMAGE" "$(sg '.security_gate.ironbank_runtime_image // ""')" \
+  "EXTRA_BUILD_ARGS" "$(echo "$json" | jq -r '[.security_gate.extra_build_args // [] | .[]] | join("\n        ")')" )"
 
 dest="$out_dir/security-gate.yml"
 if [[ "$DRY_RUN" -eq 1 ]]; then

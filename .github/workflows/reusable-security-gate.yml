@@ -55,6 +55,31 @@ on:
       runtime_apks:
         type: string
         default: ""
+      # Newline-separated KEY=VALUE pairs appended to the Docker build-args —
+      # for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/
+      # RUNTIME_IMAGE (e.g. ppubs' PYTHON_DEV/PYTHON_RUN/NODE_DEV).
+      extra_build_args:
+        type: string
+        default: ""
+      # Hardened-base policy. true (default): fail phase1-build when neither
+      # Chainguard nor Iron Bank credentials are configured. false: warn and
+      # build with the consumer-specified bases (pilot escape hatch — the
+      # consumer explicitly owns that posture).
+      require_hardened_bases:
+        type: boolean
+        default: true
+      ironbank_registry:
+        type: string
+        default: registry1.dso.mil
+      # Optional Iron Bank replacements for builder_image/runtime_image, used
+      # only when the Iron Bank failover tier engages (no CGR credentials).
+      # Left empty, the consumer's builder_image/runtime_image pass through.
+      ironbank_builder_image:
+        type: string
+        default: ""
+      ironbank_runtime_image:
+        type: string
+        default: ""
       helm_chart_path:
         type: string
         default: helm/app
@@ -117,13 +142,11 @@ env:
   # until helm times out.
   SCAN_IMAGE: ${{ inputs.scan_image }}
   IMAGE_ARTIFACT: scan-image
-  # Chainguard (cgr.dev) base args for the backend build. Override
-  # builder_image/runtime_image/runtime_apks per consumer if it needs a
-  # private Chainguard org or extra runtime packages. The "Login to
-  # Chainguard" step below authenticates with the CGR pull secrets
-  # (required, no public fallback).
-  BACKEND_BUILDER_IMAGE: ${{ inputs.builder_image }}
-  BACKEND_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  # Base-image args for the backend build. Override builder_image/
+  # runtime_image/runtime_apks per consumer if it needs a private Chainguard
+  # org or extra runtime packages. The "Login to hardened base registry" step
+  # authenticates Chainguard (CGR_PULL_*) or fails over to Iron Bank
+  # (IRONBANK_*); with neither, require_hardened_bases decides fail vs warn.
   BACKEND_RUNTIME_APKS: ${{ inputs.runtime_apks }}
   TRIVY_SEVERITY: HIGH,CRITICAL
 
@@ -151,22 +174,47 @@ jobs:
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - name: Login to Chainguard (cgr.dev)
+      # Tiered hardened-base login: Chainguard (cgr.dev) when CGR_PULL_* is
+      # configured, else Iron Bank (registry1.dso.mil) when IRONBANK_* is —
+      # optionally swapping builder/runtime to the ironbank_* image inputs.
+      # With neither, require_hardened_bases decides: fail (default) or warn
+      # and build on the consumer-specified bases.
+      - name: Login to hardened base registry (Chainguard → Iron Bank failover)
+        id: base-registry
         env:
           CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
           CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+          IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+          IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
+          IRONBANK_REGISTRY: ${{ inputs.ironbank_registry }}
         run: |
           set -uo pipefail
-          if [ -z "${CGR_PULL_TOKEN:-}" ]; then
-            echo "::error::CGR_PULL_TOKEN/CGR_PULL_USERNAME not configured — the backend builds ONLY on Chainguard cgr.dev bases (no public fallback). Add the Chainguard pull secrets."
+          login_retry() { # <registry> <username> <token>
+            local attempt=1 delay=15
+            until printf '%s' "$3" | docker login "$1" -u "$2" --password-stdin; do
+              if [ "$attempt" -ge 4 ]; then echo "$1 login failed after 4 attempts" >&2; return 1; fi
+              echo "$1 login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
+              sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
+            done
+          }
+          builder='${{ inputs.builder_image }}'
+          runtime='${{ inputs.runtime_image }}'
+          if [ -n "${CGR_PULL_TOKEN:-}" ]; then
+            login_retry cgr.dev "$CGR_PULL_USERNAME" "$CGR_PULL_TOKEN"
+            echo "Hardened bases: Chainguard (cgr.dev)"
+          elif [ -n "${IRONBANK_TOKEN:-}" ]; then
+            login_retry "$IRONBANK_REGISTRY" "$IRONBANK_USERNAME" "$IRONBANK_TOKEN"
+            [ -n '${{ inputs.ironbank_builder_image }}' ] && builder='${{ inputs.ironbank_builder_image }}'
+            [ -n '${{ inputs.ironbank_runtime_image }}' ] && runtime='${{ inputs.ironbank_runtime_image }}'
+            echo "::notice::CGR_PULL_TOKEN not configured — failing over to Iron Bank (${IRONBANK_REGISTRY})"
+          elif [ '${{ inputs.require_hardened_bases }}' = 'true' ]; then
+            echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank failover), or set require_hardened_bases: false to accept consumer-specified bases."
             exit 1
+          else
+            echo "::warning::No hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login."
           fi
-          attempt=1; delay=15
-          until printf '%s' "$CGR_PULL_TOKEN" | docker login cgr.dev -u "$CGR_PULL_USERNAME" --password-stdin; do
-            if [ "$attempt" -ge 4 ]; then echo "cgr.dev login failed after 4 attempts" >&2; exit 1; fi
-            echo "cgr.dev login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
-            sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
-          done
+          echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
+          echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"
 
       - name: Build scan image (local load, no push)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
@@ -178,13 +226,14 @@ jobs:
           tags: ${{ env.SCAN_IMAGE }}
           platforms: linux/amd64
           build-args: |
-            BUILDER_IMAGE=${{ env.BACKEND_BUILDER_IMAGE }}
-            RUNTIME_IMAGE=${{ env.BACKEND_RUNTIME_IMAGE }}
+            BUILDER_IMAGE=${{ steps.base-registry.outputs.builder_image }}
+            RUNTIME_IMAGE=${{ steps.base-registry.outputs.runtime_image }}
             APP_PATH=${{ inputs.app_path }}
             APP_PACKAGE=${{ inputs.app_package }}
             APP_MODULE=${{ inputs.app_module }}
             APP_PORT=${{ inputs.app_port }}
             RUNTIME_APKS=${{ env.BACKEND_RUNTIME_APKS }}
+            ${{ inputs.extra_build_args }}
           cache-from: type=gha,scope=security-scan-backend
           cache-to: type=gha,mode=max,scope=security-scan-backend
           provenance: false
@@ -474,11 +523,83 @@ jobs:
       # Restricted-PSS assertion on the rendered releases — a machine-checkable
       # re-scan of the templated securityContext rows. Ported from the modular
       # helm-validate.yml (which this workflow replaces) so that pod-security
-      # enforcement isn't lost.
+      # enforcement isn't lost. Consumers with their own secctx make target
+      # keep it; consumers without one (e.g. no root Makefile) fall back to
+      # the gate's bundled checker below, so onboarding never requires
+      # consumer-side tooling.
       - name: Set up uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+      - name: Write bundled restricted-PSS checker
+        run: |
+          cat > /tmp/ci-scans-assert-pss.py <<'PYEOF'
+          """Assert restricted-PSS securityContext rows on rendered chart YAML.
+
+          For every pod spec in the render (Deployment/StatefulSet/DaemonSet/
+          ReplicaSet/Job/CronJob/Pod), each container and initContainer must
+          have, at container or pod level:
+            - runAsNonRoot: true
+            - allowPrivilegeEscalation: false
+            - capabilities.drop containing ALL (container level)
+            - seccompProfile.type RuntimeDefault or Localhost
+          """
+          import sys
+          import yaml
+
+          WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "Pod"}
+
+          def pod_specs(doc):
+              kind = doc.get("kind")
+              meta = doc.get("metadata", {}).get("name", "?")
+              if kind == "Pod":
+                  yield kind, meta, doc.get("spec", {})
+              elif kind in WORKLOAD_KINDS:
+                  yield kind, meta, doc.get("spec", {}).get("template", {}).get("spec", {})
+              elif kind == "CronJob":
+                  yield kind, meta, (doc.get("spec", {}).get("jobTemplate", {})
+                                     .get("spec", {}).get("template", {}).get("spec", {}))
+
+          def check(path):
+              errors = []
+              with open(path) as f:
+                  docs = [d for d in yaml.safe_load_all(f) if isinstance(d, dict)]
+              checked = 0
+              for doc in docs:
+                  for kind, name, spec in pod_specs(doc):
+                      pod_sc = spec.get("securityContext") or {}
+                      for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+                          checked += 1
+                          where = f"{kind}/{name} container={c.get('name', '?')}"
+                          sc = c.get("securityContext") or {}
+                          def level(key):
+                              return sc.get(key, pod_sc.get(key))
+                          if level("runAsNonRoot") is not True:
+                              errors.append(f"{where}: runAsNonRoot must be true")
+                          if sc.get("allowPrivilegeEscalation") is not False:
+                              errors.append(f"{where}: allowPrivilegeEscalation must be false")
+                          drops = [str(x).upper() for x in (sc.get("capabilities") or {}).get("drop") or []]
+                          if "ALL" not in drops:
+                              errors.append(f"{where}: capabilities.drop must include ALL")
+                          seccomp = (level("seccompProfile") or {}).get("type")
+                          if seccomp not in ("RuntimeDefault", "Localhost"):
+                              errors.append(f"{where}: seccompProfile.type must be RuntimeDefault or Localhost")
+              if checked == 0:
+                  errors.append("no pod specs found in rendered chart — nothing was asserted")
+              for e in errors:
+                  print(f"::error::restricted-PSS: {e}")
+              print(f"restricted-PSS: {checked} container(s) checked, {len(errors)} violation(s)")
+              return 1 if errors else 0
+
+          if __name__ == "__main__":
+              sys.exit(check(sys.argv[1]))
+          PYEOF
       - name: Assert rendered pod-security controls (restricted PSS)
-        run: make ${{ inputs.secctx_make_target }}
+        run: |
+          if [ -f Makefile ] && make -n ${{ inputs.secctx_make_target }} >/dev/null 2>&1; then
+            make ${{ inputs.secctx_make_target }}
+          else
+            echo "::notice::consumer has no '${{ inputs.secctx_make_target }}' make target — running the gate's bundled restricted-PSS assertion"
+            uv run --with pyyaml python3 /tmp/ci-scans-assert-pss.py /tmp/rendered-chart.yaml
+          fi
 
   # --------------------------------------------------------------------------
   # Cluster smoke — kind + helm install + GET /health against the built image.
@@ -639,6 +760,13 @@ jobs:
     if: needs.phase1-build.result == 'success'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # Consumers aren't required to carry scanner config files — default to
+      # empty ones so Trivy/Grype don't error on a missing path.
+      - name: Default scanner configs when consumer lacks them
+        run: |
+          [ -f .trivyignore ] || : > .trivyignore
+          [ -f .grype.yaml ] || echo 'ignore: []' > .grype.yaml
 
       - name: Download image artifact (built in phase1-build)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4

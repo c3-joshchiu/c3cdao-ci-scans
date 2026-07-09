@@ -16,7 +16,7 @@ consumer repo
 
 ## Prerequisites
 
-- `gh`, `jq`, `ruby` (YAML load)
+- `gh`, `jq`, `uv` (config load/validate + caller render run as PEP 723 Python scripts under `scripts/lib/`)
 - `gh auth` with **admin** on target repo
 - Consumer allows reusable workflows from this repo's owner (`enable-reusable-access.sh` if the callee is private)
 

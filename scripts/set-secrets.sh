@@ -81,23 +81,18 @@ for f in "${ENV_FILES[@]}"; do
 done
 [[ ${#resolved_files[@]} -gt 0 ]] || die "no env files — set secrets.env_files in config or pass --env-file"
 
-# Merge KEY=VALUE from files (later files override earlier) into a temp map file.
+# Merge KEY=VALUE from files (later files override earlier) via python-dotenv,
+# which handles quoting, escapes, and inline # correctly — the old sed parser
+# mangled values containing quotes or comment characters.
+require_cmd uv
+name_args=()
+for n in "${names[@]}"; do name_args+=(--name "$n"); done
 map_file="$(mktemp)"
 trap 'rm -f "$map_file"' EXIT
-for env_file in "${resolved_files[@]}"; do
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"
-    line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [[ -z "$line" || "$line" != *=* ]] && continue
-    key="${line%%=*}"
-    printf '%s\n' "$line" >>"$map_file"
-  done <"$env_file"
-done
+uv run --quiet "$ROOT/scripts/lib/read_env.py" "${name_args[@]}" "${resolved_files[@]}" >"$map_file"
 
 get_value() {
-  local key="$1"
-  { grep -E "^${key}=" "$map_file" 2>/dev/null || true; } | tail -1 | cut -d= -f2- \
-    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+  { grep -E "^$1=" "$map_file" 2>/dev/null || true; } | head -1 | cut -d= -f2-
 }
 
 if ! gh api "repos/${target}" --jq '.permissions.admin' 2>/dev/null | grep -q true; then

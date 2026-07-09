@@ -9,10 +9,11 @@ c3cdao-ci-scans
 └── .github/workflows/reusable-security-gate.yml   ← unified gate logic (workflow_call)
 
 consumer repo
-└── .github/workflows/security-gate.yml            ← ~35 lines: triggers + uses: ...@ref
+└── .github/workflows/security-gate.yml            ← ~45 lines: triggers + uses: ...@ref
 ```
 
-**One required branch-protection check:** `Security Scan / Security Gate`
+**One required branch-protection check:** `security-scan / Security Gate` (the live
+job-id-prefixed context; the workflow's display name is `Security Scan / Security Gate`)
 
 ## Prerequisites
 
@@ -26,19 +27,25 @@ consumer repo
 git clone https://github.com/<owner>/c3cdao-ci-scans
 cd c3cdao-ci-scans
 
-cp configs/examples/example-monorepo.yaml configs/my-repo.yaml
+# configs/local/ is gitignored — real configs (org names, local paths) live there
+cp configs/examples/example-monorepo.yaml configs/local/my-repo.yaml
 # edit target.*, security_gate.*, secrets.env_files, local_path
+# (schema-validated at load: typos fail with pathed errors, see config/schema.json)
 
 # Full pilot flow (private consumer):
-./scripts/onboard-repo.sh --config configs/my-repo.yaml \
+./scripts/onboard-repo.sh --config configs/local/my-repo.yaml \
   --enable-access --set-secrets --pilot-pr --skip-ruleset
 
 # After Security Scan runs on the PR:
-./scripts/discover-check-names.sh --config configs/my-repo.yaml --pr <N>
-./scripts/smoke-test.sh --config configs/my-repo.yaml --pr <N>
-./scripts/setup-ruleset.sh --config configs/my-repo.yaml        # disabled
-./scripts/setup-ruleset.sh --config configs/my-repo.yaml --enable  # private repos need a paid org/enterprise plan for rulesets
+./scripts/discover-check-names.sh --config configs/local/my-repo.yaml --pr <N>
+./scripts/smoke-test.sh --config configs/local/my-repo.yaml --pr <N>
+./scripts/setup-ruleset.sh --config configs/local/my-repo.yaml        # disabled
+./scripts/setup-ruleset.sh --config configs/local/my-repo.yaml --enable  # private repos need a paid org/enterprise plan for rulesets
 ```
+
+To pilot on a shared repo **without touching its real trunk**, cut a scratch branch
+and set `target.trunk_branches: [<scratch>]` + `ruleset.target_branch: <scratch>` —
+full walkthrough in the [CI CD Workflow runbook](https://c3energy.atlassian.net/wiki/spaces/CCA/pages/10910040079/CI+CD+Workflow).
 
 ### Caller requirements (baked into template)
 
@@ -61,8 +68,8 @@ Uses `gh secret set` (encrypts locally). Never commit `.env` files.
 
 | Secret | Job |
 |--------|-----|
-| `CGR_PULL_TOKEN`, `CGR_PULL_USERNAME` | Phase 1 build (Chainguard base images) |
-| `IRONBANK_TOKEN`, `IRONBANK_USERNAME` | SonarQube ephemeral |
+| `CGR_PULL_TOKEN`, `CGR_PULL_USERNAME` | Phase 1 build (Chainguard bases, primary tier) |
+| `IRONBANK_TOKEN`, `IRONBANK_USERNAME` | SonarQube ephemeral + Phase 1 build Iron Bank failover tier |
 
 ## Config (`security_gate` inputs)
 
@@ -122,7 +129,7 @@ Pin consumers: `@v0.x.x` instead of `@main`.
 
 1. Add the caller via `render-callers.sh` (or use ci-scans reusable + caller only after validation)
 2. Delete modular workflows: `secret-scan.yml`, `semgrep.yml`, `sca-scan.yml`, `sonarqube.yml`, `helm-validate.yml`, `pr-gate.yml` (STIG stays separate if still needed)
-3. Update ruleset: only `Security Scan / Security Gate` required
+3. Update ruleset: only `security-scan / Security Gate` required
 4. Set repo variable `SECURITY_SCAN_BLOCKING=true` when ready to enforce vuln/cluster gates
 
 ## Note on path efficiency

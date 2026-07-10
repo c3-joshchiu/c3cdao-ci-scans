@@ -21,7 +21,14 @@ jobs:
       pull-requests: write
       actions: write
     uses: {{CI_SCANS_OWNER}}/{{CI_SCANS_REPO}}/.github/workflows/reusable-security-gate.yml@{{CI_SCANS_REF}}
-    secrets: inherit
+    # Explicit mapping, not `secrets: inherit` — inherit only works when caller
+    # and callee share an org/enterprise; across owners it silently passes
+    # nothing. Explicit values evaluate in the caller's context and always work.
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
     with:
       scan_image: {{SCAN_IMAGE}}
       dockerfile: {{DOCKERFILE}}

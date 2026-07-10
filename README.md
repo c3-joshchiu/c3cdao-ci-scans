@@ -53,6 +53,9 @@ The generated `security-gate.yml` must grant permissions the reusable workflow n
 
 - `pull-requests: write`, `actions: write` (caller is the ceiling — reusable cannot elevate)
 - No duplicate `concurrency` on the caller (reusable workflow owns the group)
+- Secrets passed **explicitly**, not `secrets: inherit` — inherit only works when
+  caller and callee share an org/enterprise; across owners it silently passes
+  nothing (callee sees empty secrets, SonarQube dies at setup with `Unexpected value ''`)
 
 Live required check name: `security-scan / Security Gate` (job id prefix). Profile `unified-gate` maps this via `check_overrides`.
 

@@ -7,10 +7,8 @@ and print it as JSON (the contract load-config.sh always had).
 
 Also importable by sibling scripts:
     load_config(path)  -> dict (validated)
-    gate_value(config, key) -> config value or the schema default, exact
-                               types preserved (False stays False — the jq
-                               `// empty` helper could never represent that).
 """
+
 import json
 import sys
 from pathlib import Path
@@ -38,16 +36,14 @@ def load_config(path: str | Path) -> dict:
             where = ".".join(str(p) for p in e.absolute_path) or "<root>"
             print(f"error: {path}: {where}: {e.message}", file=sys.stderr)
         raise SystemExit(1)
+    if "security_gate" in config:
+        print(
+            f"warning: {path}: 'security_gate' is deprecated and ignored — "
+            "gate values now live in the consumer's caller workflow (see README); "
+            "remove this block from the config",
+            file=sys.stderr,
+        )
     return config
-
-
-def gate_value(config: dict, key: str):
-    """security_gate value with the schema default as single source of truth."""
-    gate = config.get("security_gate") or {}
-    if key in gate:
-        return gate[key]
-    prop = _schema()["properties"]["security_gate"]["properties"].get(key, {})
-    return prop.get("default")
 
 
 if __name__ == "__main__":

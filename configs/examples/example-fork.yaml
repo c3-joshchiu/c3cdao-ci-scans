@@ -19,13 +19,3 @@ ruleset:
 workflows:
   enabled:
     - security-gate
-
-security_gate:
-  scan_image: app:local
-  dockerfile: containers/backend/Dockerfile
-  helm_chart_path: helm/app
-  helm_values_file: helm/app/values.yaml
-  helm_values_local_file: helm/app/values-local.yaml
-  helm_release_name: app-ci
-  cluster_name: app-ci
-  namespace: app-ci

@@ -1,0 +1,27 @@
+# Fixture: a valid ops-only config PLUS a leftover pre-shrink security_gate
+# block — the CI-reproducible stand-in for an operator's pre-shrink local
+# config. Loading must succeed (exit 0) with a named deprecation warning on
+# stderr; gate values live in the consumer's caller workflow now.
+target:
+  owner: your-org
+  repo: your-fork
+  default_branch: main
+  trunk_branches:
+    - main
+  local_path: ../your-fork
+
+ci_scans:
+  owner: your-org
+  repo: c3cdao-ci-scans
+  ref: main
+
+ruleset:
+  profile: unified-gate
+  name: security-scan-gates
+
+workflows:
+  enabled:
+    - security-gate
+
+security_gate:
+  scan_image: app:local

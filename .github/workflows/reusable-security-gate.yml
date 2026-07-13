@@ -4,11 +4,16 @@
 # status check, instead of several independent modular scan workflows.
 #
 # Structure:
+#   caller-lint       resolves the consumer's caller workflow file from
+#                     github.workflow_ref and lints it against the published
+#                     contract (contract/security-gate.schema.json) — fail
+#                     closed. Every scan job needs it, so a hand-edited caller
+#                     that regresses the scaffold invariants never scans.
 #   phase1-build      builds the backend image once, generates its image SBOM,
 #                     and hands the image to downstream jobs as a transient
 #                     `docker save` tarball uploaded via actions/upload-artifact.
 #                     No registry round-trip — the image never leaves the run.
-#   secrets-scan      TruffleHog (parallel, no needs)
+#   secrets-scan      TruffleHog (parallel after caller-lint)
 #   sast-semgrep      Semgrep (parallel, warn-only until baseline)
 #   sast-sonarqube    SonarQube ephemeral (parallel, warn-only until baseline)
 #   helm-check        helm lint + template (parallel, always blocking)
@@ -27,7 +32,7 @@
 # token and can't push to a registry, but they can upload artifacts).
 #
 # Blocking:
-#   phase1-build, secrets-scan, helm-check are always blocking.
+#   caller-lint, phase1-build, secrets-scan, helm-check are always blocking.
 #   cluster-smoke and vuln-scan gate their hard-fail on the SECURITY_SCAN_BLOCKING
 #   repo variable, but the gate still fails if they are skipped/cancelled/errored
 #   (e.g. because the build died) — a non-success on any blocking job is a gate
@@ -163,11 +168,58 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
+  # Caller lint — validate the consumer's caller file against the published
+  # contract before anything scans. The caller is read from the consumer
+  # checkout (github.workflow_ref names it); the lint tooling + contract are
+  # checked out at the exact reusable-workflow ref in use
+  # (github.job_workflow_sha). Fail closed: an unresolvable caller file or an
+  # unreadable caller is a lint failure, never a silent pass.
+  # --------------------------------------------------------------------------
+  caller-lint:
+    name: Caller Lint
+    runs-on: ubuntu-latest
+    steps:
+      # Consumer repo (github.repository = the caller's repo).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # If job_workflow_sha is empty on some trigger, fall back to @main with
+      # a logged warning — still fail-closed on lint errors.
+      - name: Warn when job_workflow_sha is unavailable
+        if: github.job_workflow_sha == ''
+        run: |
+          echo "::warning::caller-lint: github.job_workflow_sha is empty on this trigger — checking out lint tooling at @main instead of the exact reusable-workflow ref"
+
+      # Callee tooling (lint script + contract) at the reusable-workflow ref.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ github.job_workflow_sha || 'main' }}
+          path: .ci-scans-lint
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+
+      - name: Lint caller against contract
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          # WORKFLOW_REF: <owner>/<repo>/<path>@<ref> — strip repo prefix + @ref
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"
+          caller="${caller%%@*}"
+          if [ ! -f "$caller" ]; then
+            echo "::error::caller-lint: cannot resolve caller workflow file from workflow_ref='$WORKFLOW_REF' (resolved '$caller')"
+            exit 1
+          fi
+          uv run .ci-scans-lint/scripts/lib/lint_caller.py "$caller" \
+            --contract .ci-scans-lint/contract/security-gate.schema.json \
+            --consumer-root "$GITHUB_WORKSPACE"
+
+  # --------------------------------------------------------------------------
   # Phase 1 — build the backend image once and push an ephemeral scan tag
   # --------------------------------------------------------------------------
   phase1-build:
     name: Phase 1 — Docker image build
     runs-on: ubuntu-latest
+    needs: [caller-lint]
     outputs:
       image: ${{ env.SCAN_IMAGE }}
     steps:
@@ -286,6 +338,7 @@ jobs:
   secrets-scan:
     name: TruffleHog verified-secret scan
     runs-on: ubuntu-latest
+    needs: [caller-lint]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
@@ -343,6 +396,7 @@ jobs:
   sast-semgrep:
     name: SAST (Semgrep)
     runs-on: ubuntu-latest
+    needs: [caller-lint]
     continue-on-error: true
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -393,6 +447,7 @@ jobs:
   sast-sonarqube:
     name: SAST (SonarQube ephemeral)
     runs-on: ubuntu-latest
+    needs: [caller-lint]
     timeout-minutes: 30
     continue-on-error: true
     services:
@@ -516,6 +571,7 @@ jobs:
   helm-check:
     name: Helm Chart Validation
     runs-on: ubuntu-latest
+    needs: [caller-lint]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
@@ -861,7 +917,7 @@ jobs:
   security-gate:
     name: Security Gate
     runs-on: ubuntu-latest
-    needs: [phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan]
+    needs: [caller-lint, phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan]
     if: always()
     steps:
       - name: Evaluate scan results
@@ -880,7 +936,7 @@ jobs:
           # sast-semgrep / sast-sonarqube are continue-on-error (warn-only):
           # their result is 'success' regardless of findings, so they're
           # excluded here and surface only in their logs.
-          blocking = ['phase1-build', 'secrets-scan', 'helm-check', 'cluster-smoke', 'vuln-scan']
+          blocking = ['caller-lint', 'phase1-build', 'secrets-scan', 'helm-check', 'cluster-smoke', 'vuln-scan']
           bad = {k: needs.get(k, {}).get('result') for k in blocking
                  if needs.get(k, {}).get('result') != 'success'}
           if bad:

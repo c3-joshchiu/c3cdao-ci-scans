@@ -9,7 +9,7 @@
       "type": "string"
     },
     "app_package": {
-      "default": "app-backend",
+      "default": "app-backend-drifted",
       "description": "Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata.",
       "type": "string"
     },

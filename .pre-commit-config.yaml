@@ -1,0 +1,24 @@
+# See https://pre-commit.com
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        files: ^scripts/lib/.*\.py$
+      - id: ruff-format
+        files: ^scripts/lib/.*\.py$
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.16.1
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-PyYAML, types-jsonschema]
+        files: ^scripts/lib/.*\.py$
+  - repo: local
+    hooks:
+      - id: contract-extract
+        name: regenerate gate contract from workflow_call.inputs
+        entry: uv run scripts/lib/extract_contract.py
+        language: system
+        files: ^(\.github/workflows/reusable-security-gate\.yml|scripts/lib/extract_contract\.py)$
+        pass_filenames: false

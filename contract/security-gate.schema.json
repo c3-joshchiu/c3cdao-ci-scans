@@ -1,0 +1,114 @@
+{
+  "$id": "https://github.com/c3-joshchiu/c3cdao-ci-scans/contract/security-gate.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "app_module": {
+      "default": "app.main:app",
+      "description": "ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object.",
+      "type": "string"
+    },
+    "app_package": {
+      "default": "app-backend",
+      "description": "Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata.",
+      "type": "string"
+    },
+    "app_path": {
+      "default": "apps/app/backend",
+      "description": "Consumer repo path to the backend app directory, passed as the Dockerfile's APP_PATH build ARG.",
+      "type": "string"
+    },
+    "app_port": {
+      "default": "8000",
+      "description": "Container port the backend listens on, passed as the Dockerfile's APP_PORT build ARG; must match the consumer chart's backend service/probe port.",
+      "type": "string"
+    },
+    "builder_image": {
+      "default": "cgr.dev/chainguard/python:latest-dev",
+      "description": "Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile.",
+      "type": "string"
+    },
+    "cluster_name": {
+      "default": "app-ci",
+      "description": "kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart.",
+      "type": "string"
+    },
+    "dockerfile": {
+      "default": "containers/backend/Dockerfile",
+      "description": "Path to the backend Dockerfile in the consumer repo.",
+      "type": "string"
+    },
+    "extra_build_args": {
+      "default": "",
+      "description": "Newline-separated KEY=VALUE pairs appended to the Docker build-args \u2014 for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. ppubs' PYTHON_DEV/PYTHON_RUN/NODE_DEV).",
+      "type": "string"
+    },
+    "helm_chart_path": {
+      "default": "helm/app",
+      "description": "Path to the consumer's helm chart directory \u2014 the helm lint/template target and the cluster-smoke install source.",
+      "type": "string"
+    },
+    "helm_release_name": {
+      "default": "app-ci",
+      "description": "Helm release name for template and the cluster-smoke install; operator choice, no consumer-file counterpart.",
+      "type": "string"
+    },
+    "helm_values_file": {
+      "default": "helm/app/values.yaml",
+      "description": "Path to the consumer chart's base values file, used by helm lint and template.",
+      "type": "string"
+    },
+    "helm_values_local_file": {
+      "default": "helm/app/values-local.yaml",
+      "description": "Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install; its backend image tag must equal scan_image with pullPolicy: Never.",
+      "type": "string"
+    },
+    "ironbank_builder_image": {
+      "default": "",
+      "description": "Optional Iron Bank replacement for builder_image, used only when the Iron Bank failover tier engages (no CGR credentials); left empty, the consumer's builder_image passes through.",
+      "type": "string"
+    },
+    "ironbank_registry": {
+      "default": "registry1.dso.mil",
+      "description": "Iron Bank registry host, used only when the Iron Bank failover tier engages (no CGR credentials); operator decision, defaults to the DoD registry.",
+      "type": "string"
+    },
+    "ironbank_runtime_image": {
+      "default": "",
+      "description": "Optional Iron Bank replacement for runtime_image, used only when the Iron Bank failover tier engages (no CGR credentials); left empty, the consumer's runtime_image passes through.",
+      "type": "string"
+    },
+    "namespace": {
+      "default": "app-ci",
+      "description": "Kubernetes namespace cluster-smoke deploys the release into; operator choice, no consumer-file counterpart.",
+      "type": "string"
+    },
+    "require_hardened_bases": {
+      "default": true,
+      "description": "Hardened-base policy \u2014 operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch \u2014 the consumer explicitly owns that posture).",
+      "type": "boolean"
+    },
+    "runtime_apks": {
+      "default": "",
+      "description": "Extra runtime packages, passed as the Dockerfile's RUNTIME_APKS build ARG; set only when the consumer Dockerfile's runtime stage installs apks.",
+      "type": "string"
+    },
+    "runtime_image": {
+      "default": "cgr.dev/chainguard/python:latest",
+      "description": "Runtime-stage base image, passed as the Dockerfile's RUNTIME_IMAGE build ARG; must match the runtime base ARG in the consumer's Dockerfile.",
+      "type": "string"
+    },
+    "scan_image": {
+      "default": "app:local",
+      "description": "Local-daemon tag the image is built and scanned under; must match the backend image tag in the consumer's helm values-local file (the pullPolicy: Never pair \u2014 cluster-smoke kind-loads this exact tag).",
+      "type": "string"
+    },
+    "secctx_make_target": {
+      "default": "security-helm-secctx",
+      "description": "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it.",
+      "type": "string"
+    }
+  },
+  "title": "Security gate request contract (workflow_call inputs)",
+  "type": "object"
+}

@@ -115,7 +115,7 @@ on:
       app_package:
         description: "Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata."
         type: string
-        default: app-backend
+        default: app-backend-drifted
       app_module:
         description: "ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object."
         type: string

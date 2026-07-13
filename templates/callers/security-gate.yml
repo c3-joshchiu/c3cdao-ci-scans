@@ -1,0 +1,54 @@
+# Security Gate caller — copied from c3cdao-ci-scans; you own this file.
+# Edit the `with:` values below per each line's provenance comment for your repo.
+# Keep the structure: explicit secrets map, no concurrency:, job id `security-scan`.
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main]  # ← your trunk branch(es)
+  merge_group:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+
+jobs:
+  security-scan:  # renaming this job id silently un-gates merges — it is half of the required check context `security-scan / Security Gate`
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
+    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@main  # ← pin a release tag (vX.Y.Z) in prod; @main only during pilot migration
+    # Explicit mapping, never the inherit form — inherit only works when caller
+    # and callee share an org/enterprise; across owners it silently passes
+    # nothing. Explicit values evaluate in the caller's context and always work.
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
+    with:
+      scan_image: app:local  # local-daemon tag the image is built and scanned under; must equal the backend image tag in your helm values-local file (pullPolicy: Never pair)
+      dockerfile: containers/backend/Dockerfile  # path to your backend Dockerfile
+      builder_image: cgr.dev/chainguard/python:latest-dev  # build-stage base image (BUILDER_IMAGE build ARG); must match your Dockerfile's builder base ARG
+      runtime_image: cgr.dev/chainguard/python:latest  # runtime-stage base image (RUNTIME_IMAGE build ARG); must match your Dockerfile's runtime base ARG
+      runtime_apks: ""  # extra runtime packages (RUNTIME_APKS build ARG); set only if your Dockerfile's runtime stage installs apks
+      helm_chart_path: helm/app  # your helm chart directory — helm lint/template target and cluster-smoke install source
+      helm_values_file: helm/app/values.yaml  # your chart's base values file, used by helm lint and template
+      helm_values_local_file: helm/app/values-local.yaml  # your chart's local-overrides values file for cluster-smoke; backend image tag must equal scan_image with pullPolicy: Never
+      helm_release_name: app-ci  # helm release name for template and cluster-smoke install; operator choice
+      cluster_name: app-ci  # kind cluster name cluster-smoke creates and loads the image into; operator choice
+      namespace: app-ci  # kubernetes namespace cluster-smoke deploys into; operator choice
+      secctx_make_target: security-helm-secctx  # your Makefile target asserting pod security contexts; skipped with a notice if absent
+      app_path: apps/app/backend  # path to your backend app directory (APP_PATH build ARG)
+      app_package: app-backend  # backend package dist name (APP_PACKAGE build ARG); must match your backend's package metadata
+      app_module: app.main:app  # ASGI entrypoint as module:attr (APP_MODULE build ARG); must match your backend's app object
+      app_port: "8000"  # container port the backend listens on (APP_PORT build ARG); must match your chart's backend service/probe port
+      require_hardened_bases: true  # true: fail the build when neither Chainguard nor Iron Bank credentials are configured; false: warn and build with your bases (pilot escape hatch)
+      ironbank_builder_image: ""  # optional Iron Bank replacement for builder_image, used only when the Iron Bank failover tier engages; empty = builder_image passes through
+      ironbank_runtime_image: ""  # optional Iron Bank replacement for runtime_image, used only when the Iron Bank failover tier engages; empty = runtime_image passes through
+      extra_build_args: ""  # newline-separated KEY=VALUE pairs appended to Docker build-args (use a | block scalar for multiple lines) — for Dockerfiles whose base-image ARGs aren't BUILDER_IMAGE/RUNTIME_IMAGE

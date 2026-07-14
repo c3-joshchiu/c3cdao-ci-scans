@@ -8,6 +8,27 @@
 /tmp/
 *.before.json
 *.after.json
+
+# Operator-local configs (secrets paths, local clones)
 /configs/local/
+
+# Dot-dirs that are local/agent/editor only — never commit.
+# Keep `.github/` tracked (Actions workflows).
+/.plan/
 /.handoff/
 /.vscode/
+/.cursor/
+/.claude/
+/.skills/
+/.orchestra/
+/.tickets/
+/.env
+/.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

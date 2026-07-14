@@ -791,7 +791,10 @@ jobs:
               fail "helm install failed"
             }
 
-          backend_deploy=$(kubectl -n "${NAMESPACE}" get deploy -o name | grep -i backend | head -1)
+          # `|| true`: grep exits 1 on no match and errexit+pipefail would kill
+          # the step here, skipping the fail-guard below (the guard is the
+          # user-visible error; deployment-name matching is parameterized in EC-3)
+          backend_deploy=$(kubectl -n "${NAMESPACE}" get deploy -o name | grep -i backend | head -1 || true)
           [ -n "${backend_deploy}" ] || fail "no backend deployment found"
           kubectl -n "${NAMESPACE}" rollout status "${backend_deploy}" --timeout=180s || {
             echo "=== backend not ready — diagnostics ==="
@@ -805,7 +808,7 @@ jobs:
             fail "backend not ready"
           }
 
-          backend_svc=$(kubectl -n "${NAMESPACE}" get svc -o name | grep -i backend | head -1)
+          backend_svc=$(kubectl -n "${NAMESPACE}" get svc -o name | grep -i backend | head -1 || true)
           [ -n "${backend_svc}" ] || fail "no backend service found"
           kubectl -n "${NAMESPACE}" port-forward "${backend_svc}" 8000:8000 >/tmp/pf.log 2>&1 &
           pf_pid=$!

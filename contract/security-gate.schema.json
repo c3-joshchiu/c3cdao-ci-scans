@@ -43,6 +43,16 @@
       "description": "Newline-separated KEY=VALUE pairs appended to the Docker build-args \u2014 for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. ppubs' PYTHON_DEV/PYTHON_RUN/NODE_DEV).",
       "type": "string"
     },
+    "extra_containers": {
+      "default": "",
+      "description": "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable \u2014 one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Default \"\" means no extra containers (single-image behavior). Structure is validated by the caller lint; context/image defaults are applied in the build-extra job.",
+      "type": "string"
+    },
+    "health_path": {
+      "default": "/health",
+      "description": "HTTP path the cluster-smoke step probes on the booted primary image (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Primary deployable only \u2014 extra_containers get no cluster smoke.",
+      "type": "string"
+    },
     "helm_chart_path": {
       "default": "helm/app",
       "description": "Path to the consumer's helm chart directory \u2014 the helm lint/template target and the cluster-smoke install source.",
@@ -106,6 +116,16 @@
     "secctx_make_target": {
       "default": "security-helm-secctx",
       "description": "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it.",
+      "type": "string"
+    },
+    "service_port": {
+      "default": "8000",
+      "description": "Port the primary backend Kubernetes Service exposes \u2014 used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior).",
+      "type": "string"
+    },
+    "smoke_workload_match": {
+      "default": "backend",
+      "description": "Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts).",
       "type": "string"
     }
   },

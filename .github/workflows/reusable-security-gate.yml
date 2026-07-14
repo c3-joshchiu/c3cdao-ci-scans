@@ -129,6 +129,22 @@ on:
         description: "Container port the backend listens on, passed as the Dockerfile's APP_PORT build ARG; must match the consumer chart's backend service/probe port."
         type: string
         default: "8000"
+      health_path:
+        description: "HTTP path the cluster-smoke step probes on the booted primary image (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Primary deployable only — extra_containers get no cluster smoke."
+        type: string
+        default: /health
+      service_port:
+        description: "Port the primary backend Kubernetes Service exposes — used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior)."
+        type: string
+        default: "8000"
+      smoke_workload_match:
+        description: "Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts)."
+        type: string
+        default: backend
+      extra_containers:
+        description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Default \"\" means no extra containers (single-image behavior). Structure is validated by the caller lint; context/image defaults are applied in the build-extra job."
+        type: string
+        default: ""
     secrets:
       CGR_PULL_TOKEN:
         required: false
@@ -717,6 +733,10 @@ jobs:
         continue-on-error: ${{ vars.SECURITY_SCAN_BLOCKING != 'true' }}
         env:
           IMAGE: ${{ needs.phase1-build.outputs.image }}
+          APP_PORT: ${{ inputs.app_port }}
+          SERVICE_PORT: ${{ inputs.service_port }}
+          HEALTH_PATH: ${{ inputs.health_path }}
+          SMOKE_WORKLOAD_MATCH: ${{ inputs.smoke_workload_match }}
         run: |
           set -uo pipefail
           fail() { echo "::warning::cluster-smoke: $1"; exit 1; }
@@ -791,16 +811,17 @@ jobs:
               fail "helm install failed"
             }
 
-          # `|| true`: grep exits 1 on no match and errexit+pipefail would kill
-          # the step here, skipping the fail-guard below (the guard is the
-          # user-visible error; deployment-name matching is parameterized in EC-3)
-          backend_deploy=$(kubectl -n "${NAMESPACE}" get deploy -o name | grep -i backend | head -1 || true)
+          # `|| true`: grep exits 1 on no match and the step's errexit (GHA's
+          # default `bash -e {0}`) would kill it here, skipping the fail-guard
+          # below — the guard is the user-visible error. Workload name matching
+          # is configurable via the smoke_workload_match input (default 'backend').
+          backend_deploy=$(kubectl -n "${NAMESPACE}" get deploy -o name | grep -i "$SMOKE_WORKLOAD_MATCH" | head -1 || true)
           [ -n "${backend_deploy}" ] || fail "no backend deployment found"
           kubectl -n "${NAMESPACE}" rollout status "${backend_deploy}" --timeout=180s || {
             echo "=== backend not ready — diagnostics ==="
             kubectl -n "${NAMESPACE}" get pods -o wide || true
             kubectl -n "${NAMESPACE}" describe "${backend_deploy}" | tail -40 || true
-            for p in $(kubectl -n "${NAMESPACE}" get pods -l app.kubernetes.io/component=backend -o name 2>/dev/null; kubectl -n "${NAMESPACE}" get pods -o name 2>/dev/null | grep -i backend); do
+            for p in $(kubectl -n "${NAMESPACE}" get pods -l app.kubernetes.io/component=backend -o name 2>/dev/null; kubectl -n "${NAMESPACE}" get pods -o name 2>/dev/null | grep -i "$SMOKE_WORKLOAD_MATCH"); do
               echo "--- describe ${p} ---"; kubectl -n "${NAMESPACE}" describe "${p}" | tail -30 || true
               echo "--- logs ${p} (current) ---"; kubectl -n "${NAMESPACE}" logs "${p}" --all-containers --tail=60 || true
               echo "--- logs ${p} (previous) ---"; kubectl -n "${NAMESPACE}" logs "${p}" --all-containers --previous --tail=60 || true
@@ -808,15 +829,15 @@ jobs:
             fail "backend not ready"
           }
 
-          backend_svc=$(kubectl -n "${NAMESPACE}" get svc -o name | grep -i backend | head -1 || true)
+          backend_svc=$(kubectl -n "${NAMESPACE}" get svc -o name | grep -i "$SMOKE_WORKLOAD_MATCH" | head -1 || true)
           [ -n "${backend_svc}" ] || fail "no backend service found"
-          kubectl -n "${NAMESPACE}" port-forward "${backend_svc}" 8000:8000 >/tmp/pf.log 2>&1 &
+          kubectl -n "${NAMESPACE}" port-forward "${backend_svc}" "${APP_PORT}:${SERVICE_PORT}" >/tmp/pf.log 2>&1 &
           pf_pid=$!
           sleep 6
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/health || echo 000)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}${HEALTH_PATH}" || echo 000)
           kill "${pf_pid}" 2>/dev/null || true
-          echo "GET /health -> ${code}"
-          [ "${code}" = "200" ] || fail "/health returned ${code}, expected 200"
+          echo "GET ${HEALTH_PATH} -> ${code}"
+          [ "${code}" = "200" ] || fail "${HEALTH_PATH} returned ${code}, expected 200"
           echo "smoke OK"
 
   # --------------------------------------------------------------------------
@@ -915,17 +936,208 @@ jobs:
           config: .grype.yaml
 
   # --------------------------------------------------------------------------
+  # Phase 1 (extra containers) — build each additional container image once.
+  # Matrix over inputs.extra_containers; the job-level `if` short-circuits the
+  # matrix so single-image consumers (empty input) skip this entirely and are
+  # unaffected. Mirrors phase1-build (build + image SBOM + save/upload) with
+  # per-leg artifact names and buildx cache scopes so parallel legs never
+  # collide. context/image self-default in-expression (no renderer fills them).
+  # No helm/cluster-smoke contract — extras are image-scan targets only.
+  # --------------------------------------------------------------------------
+  build-extra:
+    name: Phase 1 extra — ${{ matrix.container.name }} image build
+    runs-on: ubuntu-latest
+    needs: [caller-lint]
+    if: inputs.extra_containers != '' && inputs.extra_containers != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ${{ fromJSON(inputs.extra_containers) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # Resolve the leg's image tag once (context/image self-default since no
+      # renderer normalizes the entry). Env-indirection avoids ${{ }} in shell.
+      - name: Resolve leg image tag
+        id: img
+        env:
+          RAW: ${{ matrix.container.image || format('{0}:local', matrix.container.name) }}
+        run: echo "tag=$RAW" >> "$GITHUB_OUTPUT"
+
+      # keep in sync with phase1-build "Free disk space"
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo docker image prune -af 2>/dev/null || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      # keep in sync with phase1-build "Login to hardened base registry"
+      - name: Login to hardened base registry (Chainguard → Iron Bank failover)
+        id: base-registry
+        env:
+          CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+          CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+          IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+          IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
+          IRONBANK_REGISTRY: ${{ inputs.ironbank_registry }}
+        run: |
+          set -uo pipefail
+          login_retry() { # <registry> <username> <token>
+            local attempt=1 delay=15
+            until printf '%s' "$3" | docker login "$1" -u "$2" --password-stdin; do
+              if [ "$attempt" -ge 4 ]; then echo "$1 login failed after 4 attempts" >&2; return 1; fi
+              echo "$1 login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
+              sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
+            done
+          }
+          builder='${{ inputs.builder_image }}'
+          runtime='${{ inputs.runtime_image }}'
+          if [ -n "${CGR_PULL_TOKEN:-}" ]; then
+            login_retry cgr.dev "$CGR_PULL_USERNAME" "$CGR_PULL_TOKEN"
+            echo "Hardened bases: Chainguard (cgr.dev)"
+          elif [ -n "${IRONBANK_TOKEN:-}" ]; then
+            login_retry "$IRONBANK_REGISTRY" "$IRONBANK_USERNAME" "$IRONBANK_TOKEN"
+            [ -n '${{ inputs.ironbank_builder_image }}' ] && builder='${{ inputs.ironbank_builder_image }}'
+            [ -n '${{ inputs.ironbank_runtime_image }}' ] && runtime='${{ inputs.ironbank_runtime_image }}'
+            echo "::notice::CGR_PULL_TOKEN not configured — failing over to Iron Bank (${IRONBANK_REGISTRY})"
+          elif [ '${{ inputs.require_hardened_bases }}' = 'true' ]; then
+            echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank failover), or set require_hardened_bases: false to accept consumer-specified bases."
+            exit 1
+          else
+            echo "::warning::No hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login."
+          fi
+          echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
+          echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"
+
+      # Base-image args come from the login step; the primary APP_*/RUNTIME_APKS
+      # args are backend-specific, so extra containers carry their own overrides
+      # via matrix.container.build_args (a newline-joined string).
+      - name: Build extra image (local load, no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        with:
+          context: ${{ matrix.container.context || '.' }}
+          file: ${{ matrix.container.dockerfile }}
+          push: false
+          load: true
+          tags: ${{ steps.img.outputs.tag }}
+          platforms: linux/amd64
+          build-args: |
+            BUILDER_IMAGE=${{ steps.base-registry.outputs.builder_image }}
+            RUNTIME_IMAGE=${{ steps.base-registry.outputs.runtime_image }}
+            ${{ matrix.container.build_args }}
+          cache-from: type=gha,scope=security-scan-${{ matrix.container.name }}
+          cache-to: type=gha,mode=max,scope=security-scan-${{ matrix.container.name }}
+          provenance: false
+
+      - name: Generate image SBOM (from local daemon)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ${{ steps.img.outputs.tag }}
+          format: cyclonedx-json
+          output-file: sbom-image-${{ matrix.container.name }}.json
+          artifact-name: sbom-image-${{ matrix.container.name }}
+
+      - name: Save image to tarball
+        env:
+          IMG: ${{ steps.img.outputs.tag }}
+        run: docker save "$IMG" -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: scan-image-${{ matrix.container.name }}
+          path: image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # --------------------------------------------------------------------------
+  # Vulnerability scan (extra containers) — image-only Trivy + Grype per leg.
+  # Source SBOM + source scans run once in vuln-scan (whole-repo), so these legs
+  # cover the built image only: Trivy image, Grype image, Grype image-SBOM.
+  # Same SECURITY_SCAN_BLOCKING exit-code semantics as the primary vuln-scan.
+  # --------------------------------------------------------------------------
+  vuln-scan-extra:
+    name: Vulnerability Scan extra — ${{ matrix.container.name }}
+    runs-on: ubuntu-latest
+    needs: [build-extra]
+    # build-extra is skipped when the input is empty (result != 'success'), which
+    # also short-circuits this job's matrix — no fromJSON('') at plan time.
+    if: needs.build-extra.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ${{ fromJSON(inputs.extra_containers) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Resolve leg image tag
+        id: img
+        env:
+          RAW: ${{ matrix.container.image || format('{0}:local', matrix.container.name) }}
+        run: echo "tag=$RAW" >> "$GITHUB_OUTPUT"
+
+      # keep in sync with vuln-scan "Default scanner configs when consumer lacks them"
+      - name: Default scanner configs when consumer lacks them
+        run: |
+          [ -f .trivyignore ] || : > .trivyignore
+          [ -f .grype.yaml ] || echo 'ignore: []' > .grype.yaml
+
+      - name: Download image artifact (built in build-extra)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: scan-image-${{ matrix.container.name }}
+
+      - name: Load image into local daemon
+        run: docker load -i image.tar
+
+      - name: Download image SBOM (generated in build-extra)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: sbom-image-${{ matrix.container.name }}
+
+      - name: Trivy scan — image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
+        with:
+          image-ref: ${{ steps.img.outputs.tag }}
+          format: table
+          severity: ${{ env.TRIVY_SEVERITY }}
+          exit-code: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' && '1' || '0' }}
+          trivyignores: .trivyignore
+
+      - name: Grype scan — image
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        with:
+          image: ${{ steps.img.outputs.tag }}
+          severity-cutoff: high
+          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
+          output-format: table
+          config: .grype.yaml
+
+      - name: Grype scan — image SBOM
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+        with:
+          sbom: sbom-image-${{ matrix.container.name }}  # download-artifact writes the file named after artifact-name
+          severity-cutoff: high
+          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
+          output-format: table
+          config: .grype.yaml
+
+  # --------------------------------------------------------------------------
   # Security Gate — aggregate required check
   # --------------------------------------------------------------------------
   security-gate:
     name: Security Gate
     runs-on: ubuntu-latest
-    needs: [caller-lint, phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan]
+    needs: [caller-lint, phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan, build-extra, vuln-scan-extra]
     if: always()
     steps:
       - name: Evaluate scan results
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
         run: |
           python3 << 'EOF'
           import sys, json, os
@@ -940,6 +1152,18 @@ jobs:
           # their result is 'success' regardless of findings, so they're
           # excluded here and surface only in their logs.
           blocking = ['caller-lint', 'phase1-build', 'secrets-scan', 'helm-check', 'cluster-smoke', 'vuln-scan']
+          # build-extra / vuln-scan-extra are blocking ONLY when the consumer
+          # declared extra containers (input non-empty). When empty they're
+          # skipped, and a skipped job counts as non-success — so add them to the
+          # blocking set only when they actually ran, else an empty-input gate
+          # would fail on the skip.
+          extra = (os.environ.get('EXTRA_CONTAINERS') or '').strip()
+          try:
+              has_extra = bool(json.loads(extra)) if extra else False
+          except json.JSONDecodeError:
+              has_extra = False
+          if has_extra:
+              blocking += ['build-extra', 'vuln-scan-extra']
           bad = {k: needs.get(k, {}).get('result') for k in blocking
                  if needs.get(k, {}).get('result') != 'success'}
           if bad:

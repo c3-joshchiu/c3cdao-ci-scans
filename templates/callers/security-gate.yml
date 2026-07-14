@@ -52,3 +52,7 @@ jobs:
       ironbank_builder_image: ""  # optional Iron Bank replacement for builder_image, used only when the Iron Bank failover tier engages; empty = builder_image passes through
       ironbank_runtime_image: ""  # optional Iron Bank replacement for runtime_image, used only when the Iron Bank failover tier engages; empty = runtime_image passes through
       extra_build_args: ""  # newline-separated KEY=VALUE pairs appended to Docker build-args (use a | block scalar for multiple lines) — for Dockerfiles whose base-image ARGs aren't BUILDER_IMAGE/RUNTIME_IMAGE
+      health_path: /health  # HTTP path cluster-smoke probes on the primary image (GET must return 200); e.g. /healthz, /api/health
+      service_port: "8000"  # port cluster-smoke port-forwards to — the k8s Service's port, which may differ from app_port
+      smoke_workload_match: backend  # case-insensitive substring identifying the backend Deployment/Service in cluster-smoke; set this if your deployment name has no 'backend'
+      extra_containers: ""  # extra containers to build + image-scan, as a JSON array e.g. '[{"name":"mcp","dockerfile":"containers/mcp/Dockerfile"}]'; "" = none. See the README inputs table for the entry shape

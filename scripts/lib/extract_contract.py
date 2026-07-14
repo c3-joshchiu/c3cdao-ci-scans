@@ -5,12 +5,13 @@
 """Derive the published gate request contract from `workflow_call.inputs`.
 
 Writes contract/security-gate.schema.json (JSON Schema draft 2020-12, one
-property per input) and rewrites the generated inputs table in README.md
+property per input) and rewrites the generated inputs table in docs/INPUTS.md
 between the BEGIN/END markers. Never hand-edit the outputs — this script is
-the only writer.
+the only writer. Content outside the markers (the hand-written preamble and
+worked examples) is preserved untouched.
 
 Modes:
-    (no args)              extract schema + README table
+    (no args)              extract schema + docs/INPUTS.md table
     --check-descriptions   exit non-zero listing inputs with missing/blank
                            descriptions; writes nothing
 
@@ -29,7 +30,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "reusable-security-gate.yml"
 SCHEMA_PATH = REPO_ROOT / "contract" / "security-gate.schema.json"
-README_PATH = REPO_ROOT / "README.md"
+INPUTS_DOC_PATH = REPO_ROOT / "docs" / "INPUTS.md"
 SCHEMA_ID = (
     "https://github.com/c3-joshchiu/c3cdao-ci-scans/contract/security-gate.schema.json"
 )
@@ -127,32 +128,38 @@ def render_inputs_table(inputs: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write_readme_table(inputs: dict[str, Any]) -> None:
+def write_inputs_table(inputs: dict[str, Any]) -> None:
+    """Rewrite only the marked block in docs/INPUTS.md; preserve the rest.
+
+    The hand-written preamble and worked examples live outside the BEGIN/END
+    markers and are never touched — this replaces solely the content between
+    them, so repeated runs on a clean tree are byte-idempotent.
+    """
     try:
-        text = README_PATH.read_text()
+        text = INPUTS_DOC_PATH.read_text()
     except OSError as e:
-        raise SystemExit(f"error: {README_PATH}: {e}") from e
+        raise SystemExit(f"error: {INPUTS_DOC_PATH}: {e}") from e
     has_begin = BEGIN_MARKER in text
     has_end = END_MARKER in text
     if not has_begin and not has_end:
         print(
-            "notice: README markers not found; inputs table not written",
+            f"notice: {INPUTS_DOC_PATH.name} markers not found; inputs table not written",
             file=sys.stderr,
         )
         return
     if not (has_begin and has_end):
         missing = END_MARKER if has_begin else BEGIN_MARKER
         raise SystemExit(
-            f"error: {README_PATH}: malformed generated block: missing marker {missing!r}"
+            f"error: {INPUTS_DOC_PATH}: malformed generated block: missing marker {missing!r}"
         )
     head, rest = text.split(BEGIN_MARKER, 1)
     _, tail = rest.split(END_MARKER, 1)
     new = f"{head}{BEGIN_MARKER}\n{render_inputs_table(inputs)}\n{END_MARKER}{tail}"
     if new != text:
         try:
-            README_PATH.write_text(new)
+            INPUTS_DOC_PATH.write_text(new)
         except OSError as e:
-            raise SystemExit(f"error: {README_PATH}: {e}") from e
+            raise SystemExit(f"error: {INPUTS_DOC_PATH}: {e}") from e
 
 
 def main(argv: list[str]) -> int:
@@ -167,7 +174,7 @@ def main(argv: list[str]) -> int:
         SCHEMA_PATH.write_text(schema_text)
     except OSError as e:
         raise SystemExit(f"error: {SCHEMA_PATH}: {e}") from e
-    write_readme_table(inputs)
+    write_inputs_table(inputs)
     print(f"wrote {SCHEMA_PATH.relative_to(REPO_ROOT)} ({len(inputs)} inputs)")
     return 0
 

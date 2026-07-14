@@ -1,6 +1,7 @@
 # Repo CI for ci-scans itself: the committed contract must always match a
 # fresh extraction from workflow_call.inputs, even when the local pre-commit
-# hook was skipped.
+# hook was skipped; and every caller-lint fixture must produce its expected
+# verdict so no lint rule can silently stop firing.
 
 name: CI
 
@@ -25,3 +26,11 @@ jobs:
       - name: Fail on contract drift
         run: |
           git diff --exit-code contract/ README.md || { echo "::error::contract drift — run 'uv run scripts/lib/extract_contract.py' and commit the regenerated files"; exit 1; }
+
+  caller-lint-fixtures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Assert caller-lint fixture verdicts
+        run: ./scripts/test-lint-fixtures.sh

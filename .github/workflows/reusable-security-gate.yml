@@ -198,18 +198,32 @@ jobs:
       # Consumer repo (github.repository = the caller's repo).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      # If job_workflow_sha is empty on some trigger, fall back to @main with
-      # a logged warning — still fail-closed on lint errors.
-      - name: Warn when job_workflow_sha is unavailable
-        if: github.job_workflow_sha == ''
+      # Resolve which ci-scans ref to lint against. github.job_workflow_sha is
+      # empty on pull_request-triggered reusable calls, so prefer the ref the
+      # caller actually pins in its `uses:` (parsed from the caller file), then
+      # job_workflow_sha, then main. Without this the lint validates against
+      # main's contract regardless of the pinned ref — the wrong contract the
+      # moment they diverge (e.g. piloting an as-yet-unmerged input).
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
         run: |
-          echo "::warning::caller-lint: github.job_workflow_sha is empty on this trigger — checking out lint tooling at @main instead of the exact reusable-workflow ref"
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//')"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice::caller-lint: linting against ci-scans ref '$ref'"
 
-      # Callee tooling (lint script + contract) at the reusable-workflow ref.
+      # Callee tooling (lint script + contract) at the resolved ref.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           repository: c3-joshchiu/c3cdao-ci-scans
-          ref: ${{ github.job_workflow_sha || 'main' }}
+          ref: ${{ steps.calleeref.outputs.ref }}
           path: .ci-scans-lint
 
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6

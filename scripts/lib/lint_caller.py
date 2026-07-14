@@ -15,7 +15,10 @@ Rules skipped for a stated reason print to stderr as
 active run as ``notice: active: image-values-mismatch: checked <path>``.
 
 Rule ids: no-secrets-inherit, no-caller-concurrency, unknown-input,
-type-mismatch, missing-secret-map, image-values-mismatch, unreadable-caller.
+type-mismatch, missing-secret-map, image-values-mismatch, unreadable-caller,
+extra-containers-json, extra-containers-name, extra-containers-duplicate,
+extra-containers-dockerfile, extra-containers-template-path,
+extra-containers-build-arg.
 An unreadable caller (missing/unparseable file, or no job whose ``uses:``
 matches the reusable gate workflow) fails closed.
 """
@@ -23,6 +26,7 @@ matches the reusable gate workflow) fails closed.
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -125,6 +129,113 @@ def check_image_values(
     return []
 
 
+# extra_containers per-entry validation. The contract only sees the flat
+# `extra_containers` string input, so structure is enforced here (mirrors what
+# the deleted renderer used to check). Cookiecutter/scaffold trees are never
+# buildable targets: reject dockerfile/context under these dirs or containing
+# a `{{` template token.
+_EXTRA_ALLOWED_KEYS = {"name", "dockerfile", "context", "image", "build_args"}
+_EXTRA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
+_EXTRA_BUILD_ARG_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_TEMPLATE_DENY_DIRS = ("packages/templates", "templates")
+
+
+def _is_template_path(path: str) -> bool:
+    if "{{" in path:
+        return True
+    norm = path[2:] if path.startswith("./") else path
+    norm = norm.lstrip("/")
+    return any(norm == d or norm.startswith(d + "/") for d in _TEMPLATE_DENY_DIRS)
+
+
+def check_extra_containers(with_map: dict[str, Any]) -> list[str]:
+    """Validate the caller's extra_containers value (a JSON-array string).
+
+    The gate workflow parses it with fromJSON and matrixes over it; context/image
+    defaults are applied in build-extra, and build_args is a newline-joined
+    KEY=VALUE string (consumed directly by build-extra). Absent value = no rules.
+    """
+    if "extra_containers" not in with_map:
+        return []
+    raw = with_map["extra_containers"]
+    if is_expression(raw):
+        notice("skip", "extra-containers-json", "value is an expression")
+        return []
+    if not isinstance(raw, str):
+        return [
+            "extra-containers-json: extra_containers must be a JSON-array string, "
+            f"got {yaml_json_type(raw)}"
+        ]
+    text = raw.strip()
+    if text in ("", "[]"):
+        return []
+    try:
+        entries = json.loads(text)
+    except json.JSONDecodeError as e:
+        return [f"extra-containers-json: extra_containers is not valid JSON: {e}"]
+    if not isinstance(entries, list):
+        return [
+            "extra-containers-json: extra_containers must be a JSON array, "
+            f"got {yaml_json_type(entries)}"
+        ]
+
+    violations: list[str] = []
+    seen: set[str] = set()
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            violations.append(f"extra-containers-json: entry {idx} is not an object")
+            continue
+        name = entry.get("name")
+        where = f"'{name}'" if isinstance(name, str) and name else f"entry {idx}"
+
+        unknown = set(entry) - _EXTRA_ALLOWED_KEYS
+        if unknown:
+            violations.append(
+                f"extra-containers-json: {where}: unknown key(s) {sorted(unknown)}"
+            )
+
+        if not isinstance(name, str) or not _EXTRA_NAME_RE.match(name):
+            violations.append(
+                f"extra-containers-name: {where}: name must match "
+                r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$"
+            )
+        elif name in seen:
+            violations.append(f"extra-containers-duplicate: duplicate name '{name}'")
+        else:
+            seen.add(name)
+
+        dockerfile = entry.get("dockerfile")
+        if not isinstance(dockerfile, str) or not dockerfile:
+            violations.append(
+                f"extra-containers-dockerfile: {where}: 'dockerfile' is required"
+            )
+
+        for field in ("dockerfile", "context"):
+            val = entry.get(field)
+            if isinstance(val, str) and val and _is_template_path(val):
+                violations.append(
+                    f"extra-containers-template-path: {where}: {field} '{val}' is a "
+                    "cookiecutter/scaffold path (under templates/ or "
+                    "packages/templates/, or containing '{{') — not a buildable target"
+                )
+
+        build_args = entry.get("build_args")
+        if build_args is not None:
+            if not isinstance(build_args, str):
+                violations.append(
+                    f"extra-containers-build-arg: {where}: build_args must be a "
+                    "newline-joined KEY=VALUE string"
+                )
+            else:
+                for line in build_args.splitlines():
+                    if line.strip() and not _EXTRA_BUILD_ARG_RE.match(line):
+                        violations.append(
+                            f"extra-containers-build-arg: {where}: build_args line "
+                            f"'{line}' must match ^[A-Za-z_][A-Za-z0-9_]*="
+                        )
+    return violations
+
+
 def lint(
     caller_path: Path, props: dict[str, Any], consumer_root: Path | None
 ) -> list[str]:
@@ -188,6 +299,7 @@ def lint(
                     f"missing-secret-map: secret '{name}' not mapped on job '{gate_id}'"
                 )
 
+    violations.extend(check_extra_containers(with_map))
     violations.extend(check_image_values(with_map, props, consumer_root))
     return violations
 

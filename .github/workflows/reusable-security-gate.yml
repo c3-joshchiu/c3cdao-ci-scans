@@ -1167,16 +1167,16 @@ jobs:
           # excluded here and surface only in their logs.
           blocking = ['caller-lint', 'phase1-build', 'secrets-scan', 'helm-check', 'cluster-smoke', 'vuln-scan']
           # build-extra / vuln-scan-extra are blocking ONLY when the consumer
-          # declared extra containers (input non-empty). When empty they're
-          # skipped, and a skipped job counts as non-success — so add them to the
-          # blocking set only when they actually ran, else an empty-input gate
-          # would fail on the skip.
-          extra = (os.environ.get('EXTRA_CONTAINERS') or '').strip()
-          try:
-              has_extra = bool(json.loads(extra)) if extra else False
-          except json.JSONDecodeError:
-              has_extra = False
-          if has_extra:
+          # declared extra containers. Use the SAME predicate that gates those
+          # jobs (`if: inputs.extra_containers != '' && != '[]'`) — NOT a JSON
+          # parse. A parse would default to "not blocking" on malformed input
+          # (e.g. an expression that resolves to 'not-json' / '{}' / 'null'),
+          # while the jobs still run and fail at fromJSON matrix expansion —
+          # excluding a real failure from this required check and letting it go
+          # green. Single source of truth; fail-closed on malformed input.
+          # (Empty → jobs skip → correctly excluded here.)
+          extra = os.environ.get('EXTRA_CONTAINERS') or ''
+          if extra not in ('', '[]'):
               blocking += ['build-extra', 'vuln-scan-extra']
           bad = {k: needs.get(k, {}).get('result') for k in blocking
                  if needs.get(k, {}).get('result') != 'success'}

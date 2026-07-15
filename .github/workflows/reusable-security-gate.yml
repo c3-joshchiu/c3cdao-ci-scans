@@ -74,15 +74,15 @@ on:
         type: boolean
         default: true
       ironbank_registry:
-        description: "Iron Bank registry host, used only when the Iron Bank failover tier engages (no CGR credentials); operator decision, defaults to the DoD registry."
+        description: "Iron Bank registry host used for docker login whenever IRONBANK_* secrets are set (alongside Chainguard when both are configured). Also used when primary-base failover swaps to ironbank_* images (CGR absent, Iron Bank present). Operator decision; defaults to the DoD registry."
         type: string
         default: registry1.dso.mil
       ironbank_builder_image:
-        description: "Optional Iron Bank replacement for builder_image, used only when the Iron Bank failover tier engages (no CGR credentials); left empty, the consumer's builder_image passes through."
+        description: "Optional Iron Bank replacement for builder_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's builder_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set."
         type: string
         default: ""
       ironbank_runtime_image:
-        description: "Optional Iron Bank replacement for runtime_image, used only when the Iron Bank failover tier engages (no CGR credentials); left empty, the consumer's runtime_image passes through."
+        description: "Optional Iron Bank replacement for runtime_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set."
         type: string
         default: ""
       helm_chart_path:
@@ -176,9 +176,11 @@ env:
   IMAGE_ARTIFACT: scan-image
   # Base-image args for the backend build. Override builder_image/
   # runtime_image/runtime_apks per consumer if it needs a private Chainguard
-  # org or extra runtime packages. The "Login to hardened base registry" step
-  # authenticates Chainguard (CGR_PULL_*) or fails over to Iron Bank
-  # (IRONBANK_*); with neither, require_hardened_bases decides fail vs warn.
+  # org or extra runtime packages. The hardened-base login step authenticates
+  # Chainguard (CGR_PULL_*) and Iron Bank (IRONBANK_*) independently when each
+  # is set (both sessions can be active). Primary builder/runtime swap to
+  # ironbank_* images only when CGR is absent and Iron Bank is present; with
+  # neither credential, require_hardened_bases decides fail vs warn.
   BACKEND_RUNTIME_APKS: ${{ inputs.runtime_apks }}
   TRIVY_SEVERITY: HIGH,CRITICAL
 

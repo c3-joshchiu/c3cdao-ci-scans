@@ -74,8 +74,8 @@ variables → Actions → New repository secret.
 
 | Secret | Job |
 |--------|-----|
-| `CGR_PULL_TOKEN`, `CGR_PULL_USERNAME` | Phase 1 build — Chainguard bases (primary tier) |
-| `IRONBANK_TOKEN`, `IRONBANK_USERNAME` | SonarQube ephemeral + Phase 1 build Iron Bank failover tier |
+| `CGR_PULL_TOKEN`, `CGR_PULL_USERNAME` | Phase 1 build — Chainguard (`cgr.dev`) login |
+| `IRONBANK_TOKEN`, `IRONBANK_USERNAME` | SonarQube ephemeral + Phase 1 / build-extra Iron Bank (`registry1.dso.mil`) login — can run **alongside** Chainguard when both are set |
 
 ## 5. Create and enable the ruleset
 
@@ -187,13 +187,22 @@ uv run scripts/lib/lint_caller.py <caller.yml> \
   [--consumer-root <consumer-checkout>]
 ```
 
-## Hardened-base registry failover (phase1-build)
+## Hardened-base registry login (phase1-build + build-extra)
 
-1. `CGR_PULL_TOKEN` set → login `cgr.dev`, Chainguard bases (primary).
-2. Else `IRONBANK_TOKEN` set → login `registry1.dso.mil` (Iron Bank), optionally
-   swapping to `ironbank_builder_image`/`ironbank_runtime_image`.
-3. Else `require_hardened_bases: false` → warn and build on the consumer's own
-   bases; otherwise fail (no silent public fallback).
+Logins are **independent** (docker stores credentials per registry host). Setting
+both `CGR_PULL_*` and `IRONBANK_*` authenticates **both** in one run — required
+for mixed-base repos (e.g. Chainguard primary + Iron Bank `extra_containers`).
+
+1. `CGR_PULL_TOKEN` set → login `cgr.dev`.
+2. `IRONBANK_TOKEN` set → login `registry1.dso.mil` (does **not** require CGR to
+   be absent).
+3. **Primary-base image swap** (separate from login): only when Chainguard is
+   *absent* and Iron Bank is *present*, the primary builder/runtime may swap to
+   `ironbank_builder_image` / `ironbank_runtime_image`. With both creds set, the
+   primary keeps its Chainguard bases; extras pull Iron Bank bases via the
+   second login.
+4. Neither credential → `require_hardened_bases: false` warns and builds on the
+   consumer's own bases; otherwise fail (no silent public fallback).
 
 Consumers without a root `Makefile`/`security-helm-secctx` target get the gate's
 bundled restricted-PSS assertion in helm-check, and vuln-scan defaults empty

@@ -49,8 +49,8 @@ jobs:
       app_module: app.main:app  # ASGI entrypoint as module:attr (APP_MODULE build ARG); must match your backend's app object
       app_port: "8000"  # container port the backend listens on (APP_PORT build ARG); must match your chart's backend service/probe port
       require_hardened_bases: true  # true: fail the build when neither Chainguard nor Iron Bank credentials are configured; false: warn and build with your bases (pilot escape hatch)
-      ironbank_builder_image: ""  # optional Iron Bank replacement for builder_image, used only when the Iron Bank failover tier engages; empty = builder_image passes through
-      ironbank_runtime_image: ""  # optional Iron Bank replacement for runtime_image, used only when the Iron Bank failover tier engages; empty = runtime_image passes through
+      ironbank_builder_image: ""  # optional Iron Bank replacement for builder_image — only on primary-base failover (CGR absent AND Iron Bank present); empty = builder_image passes through. Iron Bank login itself runs whenever IRONBANK_* is set (can be alongside Chainguard)
+      ironbank_runtime_image: ""  # optional Iron Bank replacement for runtime_image — only on primary-base failover (CGR absent AND Iron Bank present); empty = runtime_image passes through. Iron Bank login itself runs whenever IRONBANK_* is set (can be alongside Chainguard)
       extra_build_args: ""  # newline-separated KEY=VALUE pairs appended to Docker build-args (use a | block scalar for multiple lines) — for Dockerfiles whose base-image ARGs aren't BUILDER_IMAGE/RUNTIME_IMAGE
       health_path: /health  # HTTP path cluster-smoke probes on the primary image (GET must return 200); e.g. /healthz, /api/health
       service_port: "8000"  # port cluster-smoke port-forwards to — the k8s Service's port, which may differ from app_port

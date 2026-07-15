@@ -13,7 +13,7 @@ Source of truth for the job list is
 | Job | Spec gate / requirement | Tool(s) | Target | Current posture | Alignment |
 |---|---|---|---|---|---|
 | `caller-lint` | (scaffolding pre-flight — not a spec gate) | `lint_caller.py` | caller config | always fail-closed | aligned (guards the gate) |
-| `phase1-build` | build hardened image + base failover | Docker + CGR/Iron Bank | image | always blocking | aligned |
+| `phase1-build` | build hardened image + dual-registry login (CGR and/or Iron Bank) | Docker + CGR/Iron Bank | image | always blocking | aligned |
 | `secrets-scan` | Secrets detection | TruffleHog | source | job blocking; finding advisory until `SECURITY_SCAN_BLOCKING=true` | aligned |
 | `sast-semgrep` | SAST | Semgrep | source | warn-only (`continue-on-error`) | intentional ramp |
 | `sast-sonarqube` | SAST | SonarQube | source | warn-only (`continue-on-error`) | intentional ramp |

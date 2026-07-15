@@ -60,6 +60,6 @@ acceptable only during the pilot migration window.
 ## Docs
 
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — full onboarding, ruleset provenance, enforcement
-  model, caller-lint rule ids, base-image failover, and maintenance.
+  model, caller-lint rule ids, hardened-base login (dual registry), and maintenance.
 - [docs/INPUTS.md](docs/INPUTS.md) — every `with:` field with type, default, and provenance.
 - [docs/REQUIREMENTS-MAP.md](docs/REQUIREMENTS-MAP.md) — gate jobs mapped to the CI spec.

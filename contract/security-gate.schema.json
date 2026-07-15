@@ -75,17 +75,17 @@
     },
     "ironbank_builder_image": {
       "default": "",
-      "description": "Optional Iron Bank replacement for builder_image, used only when the Iron Bank failover tier engages (no CGR credentials); left empty, the consumer's builder_image passes through.",
+      "description": "Optional Iron Bank replacement for builder_image \u2014 applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's builder_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set.",
       "type": "string"
     },
     "ironbank_registry": {
       "default": "registry1.dso.mil",
-      "description": "Iron Bank registry host, used only when the Iron Bank failover tier engages (no CGR credentials); operator decision, defaults to the DoD registry.",
+      "description": "Iron Bank registry host used for docker login whenever IRONBANK_* secrets are set (alongside Chainguard when both are configured). Also used when primary-base failover swaps to ironbank_* images (CGR absent, Iron Bank present). Operator decision; defaults to the DoD registry.",
       "type": "string"
     },
     "ironbank_runtime_image": {
       "default": "",
-      "description": "Optional Iron Bank replacement for runtime_image, used only when the Iron Bank failover tier engages (no CGR credentials); left empty, the consumer's runtime_image passes through.",
+      "description": "Optional Iron Bank replacement for runtime_image \u2014 applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set.",
       "type": "string"
     },
     "namespace": {

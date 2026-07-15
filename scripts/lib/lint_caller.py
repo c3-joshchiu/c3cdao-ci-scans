@@ -138,7 +138,14 @@ def check_image_values(
 # the deleted renderer used to check). Cookiecutter/scaffold trees are never
 # buildable targets: reject dockerfile/context under these dirs or containing
 # a `{{` template token.
-_EXTRA_ALLOWED_KEYS = {"name", "dockerfile", "context", "image", "build_args"}
+_EXTRA_ALLOWED_KEYS = {
+    "name",
+    "dockerfile",
+    "context",
+    "image",
+    "target",
+    "build_args",
+}
 _EXTRA_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$")
 _EXTRA_BUILD_ARG_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _TEMPLATE_DENY_DIRS = ("packages/templates", "templates")
@@ -232,6 +239,12 @@ def check_extra_containers(with_map: dict[str, Any]) -> list[str]:
                     "cookiecutter/scaffold path (under templates/ or "
                     "packages/templates/, or containing '{{') — not a buildable target"
                 )
+
+        stage = entry.get("target")
+        if stage is not None and not isinstance(stage, str):
+            violations.append(
+                f"extra-containers-target: {where}: target must be a string stage name"
+            )
 
         build_args = entry.get("build_args")
         if build_args is not None:

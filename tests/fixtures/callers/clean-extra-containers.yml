@@ -60,6 +60,7 @@ jobs:
             "dockerfile": "apps/frontend/Dockerfile",
             "context": "apps/frontend",
             "image": "frontend:ci",
+            "target": "production",
             "build_args": "NODE_DEV=x\nNODE_RUN=y"
           }
         ]

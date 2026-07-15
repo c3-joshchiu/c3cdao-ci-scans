@@ -33,6 +33,11 @@
       "description": "kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart.",
       "type": "string"
     },
+    "context": {
+      "default": ".",
+      "description": "Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend).",
+      "type": "string"
+    },
     "dockerfile": {
       "default": "containers/backend/Dockerfile",
       "description": "Path to the backend Dockerfile in the consumer repo.",

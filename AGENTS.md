@@ -107,6 +107,14 @@ Minimize token consumption and prevent context window pollution while maintainin
 - Transform tasks into verifiable goals (e.g. "Add validation" → "Write tests for invalid inputs, then make them pass").
 - For multi-step tasks, state a brief plan and verify each step.
 
+## Parallel work (git worktrees)
+
+- **Do not** run two write agents in the same working tree. `git checkout` / `git switch` in one session moves `HEAD` for every session sharing that directory.
+- Prefer one linked worktree per concurrent branch under `.worktrees/<slug>/` (must be gitignored). Keep the primary checkout on `main` (or one stable integration branch).
+- Bind each write session’s cwd / workspace root to its worktree path — not the primary checkout.
+- Write subagents must receive an absolute worktree path and must not `checkout` / `switch` in the parent tree. Read-only explore/review may share the parent tree.
+- Prefer harness-native isolation when already present; otherwise `git worktree add`. Full playbook: skill companion `project-onboarding/WORKTREES.md` (or repo docs that mirror it).
+
 ## STANDARDS.md
 
 - Global standards: `~/.skills/STANDARDS.md` (authoritative for patterns)

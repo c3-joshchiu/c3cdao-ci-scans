@@ -13,6 +13,9 @@ Thumbs.db
 .skills/
 .gemini/skills/
 
+# Linked git worktrees (parallel agent sessions)
+.worktrees/
+
 # --- cursorignore: python ---
 .venv/
 venv/

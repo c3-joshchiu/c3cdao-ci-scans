@@ -1253,11 +1253,30 @@ jobs:
     needs: [caller-lint, phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan, build-extra, vuln-scan-extra]
     if: always()
     steps:
-      # job_workflow_sha is the commit of this reusable workflow (the pin).
+      # Consumer checkout so we can parse the caller's uses: pin. job_workflow_sha
+      # is empty on pull_request-triggered reusable calls (same as caller-lint).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//' | tr -d '#')"
+            ref="${ref%%[[:space:]]*}"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice::security-gate: evaluating with ci-scans ref '$ref'"
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           repository: c3-joshchiu/c3cdao-ci-scans
-          ref: ${{ github.job_workflow_sha }}
+          ref: ${{ steps.calleeref.outputs.ref }}
           path: .ci-scans
 
       - name: Evaluate scan results

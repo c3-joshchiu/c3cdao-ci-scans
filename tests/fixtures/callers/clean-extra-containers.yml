@@ -49,4 +49,17 @@ jobs:
       ironbank_builder_image: ""
       ironbank_runtime_image: ""
       extra_build_args: ""
-      extra_containers: '[{"name":"mcp-data-server","dockerfile":"containers/mcp/Dockerfile"},{"name":"frontend","dockerfile":"apps/frontend/Dockerfile","context":"apps/frontend","image":"frontend:ci","build_args":"NODE_DEV=x\nNODE_RUN=y"}]'
+      extra_containers: |
+        [
+          {
+            "name": "mcp-data-server",
+            "dockerfile": "containers/mcp/Dockerfile"
+          },
+          {
+            "name": "frontend",
+            "dockerfile": "apps/frontend/Dockerfile",
+            "context": "apps/frontend",
+            "image": "frontend:ci",
+            "build_args": "NODE_DEV=x\nNODE_RUN=y"
+          }
+        ]

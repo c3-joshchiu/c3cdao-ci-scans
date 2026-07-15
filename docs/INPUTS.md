@@ -32,6 +32,11 @@ Build and image-scan a worker or sidecar alongside the primary deployable.
 `extra_containers` is a JSON array passed as a string; one object per extra
 image. Only the primary deployable gets a cluster smoke test.
 
+**Format:** use a multiline YAML `|` block so each object is readable and
+diffable. Do not pack the array onto one quoted line — that form parses, but
+it does not scale past one extra image and is hard to review. Caller-lint
+emits a style notice (`extra-containers-format`) when it sees one-line packing.
+
 ```yaml
 jobs:
   security-scan:
@@ -47,6 +52,12 @@ jobs:
             "context": ".",
             "image": "worker:local",
             "build_args": "APP_PATH=apps/app/worker\nAPP_PACKAGE=app-worker"
+          },
+          {
+            "name": "frontend",
+            "dockerfile": "apps/frontend/Dockerfile",
+            "context": "apps/frontend",
+            "image": "frontend:local"
           }
         ]
     secrets: inherit
@@ -100,5 +111,5 @@ jobs:
 | `health_path` | string | `/health` | HTTP path the cluster-smoke step probes on the booted primary image (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Primary deployable only — extra_containers get no cluster smoke. |
 | `service_port` | string | `8000` | Port the primary backend Kubernetes Service exposes — used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior). |
 | `smoke_workload_match` | string | `backend` | Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts). |
-| `extra_containers` | string | `""` | JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Default "" means no extra containers (single-image behavior). Structure is validated by the caller lint; context/image defaults are applied in the build-extra job. |
+| `extra_containers` | string | `""` | JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '\|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default "" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra. |
 <!-- END GENERATED: security-gate-inputs -->

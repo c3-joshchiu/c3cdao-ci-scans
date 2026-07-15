@@ -178,6 +178,16 @@ def check_extra_containers(with_map: dict[str, Any]) -> list[str]:
             "extra-containers-json: extra_containers must be a JSON array, "
             f"got {yaml_json_type(entries)}"
         ]
+    # Style only (stderr notice, not a violation): a single-line quoted JSON
+    # array is valid but hard to review once there is more than one entry.
+    # Prefer a multiline YAML '|' block — see docs/INPUTS.md.
+    if entries and "\n" not in text:
+        notice(
+            "style",
+            "extra-containers-format",
+            "prefer a multiline YAML '|' block (one object per entry); "
+            "single-line quoted JSON does not scale — see docs/INPUTS.md",
+        )
 
     violations: list[str] = []
     seen: set[str] = set()

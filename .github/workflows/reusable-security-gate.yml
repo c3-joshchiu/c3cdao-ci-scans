@@ -16,9 +16,10 @@
 #   secrets-scan      TruffleHog (parallel after caller-lint)
 #   sast-semgrep      Semgrep (parallel, warn-only until baseline)
 #   sast-sonarqube    SonarQube ephemeral (parallel, warn-only until baseline)
-#   helm-check        helm lint + template (parallel, always blocking)
+#   helm-check        helm lint + template (parallel; blocking unless image_only)
 #   cluster-smoke     kind + helm install + GET /health against the built image
-#                     (needs: phase1-build) — proves the image actually boots
+#                     (needs: phase1-build) — proves the image actually boots;
+#                     skipped when image_only
 #   vuln-scan         Trivy (image + source SBOM) + Grype (image + source SBOM
 #                     + image SBOM). No Trivy-on-image-SBOM: OS CVEs come from
 #                     the direct Trivy image scan; Trivy can't match OS pkgs
@@ -32,7 +33,9 @@
 # token and can't push to a registry, but they can upload artifacts).
 #
 # Blocking:
-#   caller-lint, phase1-build, secrets-scan, helm-check are always blocking.
+#   caller-lint, phase1-build, secrets-scan are always blocking.
+#   helm-check and cluster-smoke are blocking unless image_only is true
+#   (infra/image-only consumers — same skip predicate as the job `if:`).
 #   cluster-smoke and vuln-scan gate their hard-fail on the SECURITY_SCAN_BLOCKING
 #   repo variable, but the gate still fails if they are skipped/cancelled/errored
 #   (e.g. because the build died) — a non-success on any blocking job is a gate
@@ -149,6 +152,10 @@ on:
         description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra."
         type: string
         default: ""
+      image_only:
+        description: "When true, skip helm-check and cluster-smoke (and omit them from the Security Gate blocking set) — for infra/image-only repos that build and vuln-scan images without a deployable app chart. Default false keeps app callers unchanged (helm + smoke still blocking)."
+        type: boolean
+        default: false
     secrets:
       CGR_PULL_TOKEN:
         required: false
@@ -619,12 +626,13 @@ jobs:
           include-hidden-files: true
 
   # --------------------------------------------------------------------------
-  # Helm chart validity — always blocking
+  # Helm chart validity — blocking unless image_only
   # --------------------------------------------------------------------------
   helm-check:
     name: Helm Chart Validation
     runs-on: ubuntu-latest
     needs: [caller-lint]
+    if: ${{ inputs.image_only != true }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
@@ -732,7 +740,7 @@ jobs:
     name: Cluster Smoke (kind + helm + /health)
     runs-on: ubuntu-latest
     needs: [phase1-build]
-    if: needs.phase1-build.result == 'success'
+    if: ${{ inputs.image_only != true && needs.phase1-build.result == 'success' }}
     env:
       CLUSTER: ${{ inputs.cluster_name }}
       NAMESPACE: ${{ inputs.namespace }}
@@ -1189,6 +1197,7 @@ jobs:
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
+          IMAGE_ONLY: ${{ inputs.image_only }}
         run: |
           python3 << 'EOF'
           import sys, json, os
@@ -1202,7 +1211,13 @@ jobs:
           # sast-semgrep / sast-sonarqube are continue-on-error (warn-only):
           # their result is 'success' regardless of findings, so they're
           # excluded here and surface only in their logs.
-          blocking = ['caller-lint', 'phase1-build', 'secrets-scan', 'helm-check', 'cluster-smoke', 'vuln-scan']
+          blocking = ['caller-lint', 'phase1-build', 'secrets-scan', 'vuln-scan']
+          # helm-check / cluster-smoke use the SAME predicate as their job `if:`
+          # (`inputs.image_only != true`). When image_only is true those jobs
+          # skip — omit them here or a skipped result would false-fail the gate.
+          # Default false keeps app callers byte-identical (both still blocking).
+          if (os.environ.get('IMAGE_ONLY') or '').lower() != 'true':
+              blocking[3:3] = ['helm-check', 'cluster-smoke']
           # build-extra / vuln-scan-extra are blocking ONLY when the consumer
           # declared extra containers. Use the SAME predicate that gates those
           # jobs (`if: inputs.extra_containers != '' && != '[]'`) — NOT a JSON

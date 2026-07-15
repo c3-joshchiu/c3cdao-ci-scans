@@ -99,6 +99,10 @@ def check_image_values(
 ) -> list[str]:
     """scan_image must appear in the consumer's values-local file text."""
     rule = "image-values-mismatch"
+    image_only = contract_value(with_map, props, "image_only")
+    if image_only is True:
+        notice("skip", rule, "image_only is true")
+        return []
     if consumer_root is None:
         notice("skip", rule, "--consumer-root not given")
         return []

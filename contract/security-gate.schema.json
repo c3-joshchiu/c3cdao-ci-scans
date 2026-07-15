@@ -78,6 +78,11 @@
       "description": "Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install; its backend image tag must equal scan_image with pullPolicy: Never.",
       "type": "string"
     },
+    "image_only": {
+      "default": false,
+      "description": "When true, skip helm-check and cluster-smoke (and omit them from the Security Gate blocking set) \u2014 for infra/image-only repos that build and vuln-scan images without a deployable app chart. Default false keeps app callers unchanged (helm + smoke still blocking).",
+      "type": "boolean"
+    },
     "ironbank_builder_image": {
       "default": "",
       "description": "Optional Iron Bank replacement for builder_image \u2014 applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's builder_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set.",

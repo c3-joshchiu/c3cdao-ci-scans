@@ -63,6 +63,11 @@ Two spec items are intentionally owned elsewhere:
   establishes a clean SAST/vuln baseline is a bootstrap action run once per repo,
   not a per-PR job. It is a prerequisite the operator runs before flipping
   `SECURITY_SCAN_BLOCKING=true`, not part of the reusable gate.
+- **Approved-image / private-mirror OS-layer scan** — the gate only builds and
+  scans images whose bases are pullable via `cgr.dev` / `registry1.dso.mil`.
+  Private-mirror or entitlement-unreachable prod bases (and attestation that the
+  *approved* image is clean) remain with the consumer IL5 / Game Warden pipeline.
+  When `require_hardened_bases: false`, vuln-scan labels a **proxy scan**.
 
 ### Single documented tool exception: no Trivy-on-image-SBOM
 

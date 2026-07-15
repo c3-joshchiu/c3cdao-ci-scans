@@ -32,6 +32,12 @@ Build and image-scan a worker or sidecar alongside the primary deployable.
 `extra_containers` is a JSON array passed as a string; one object per extra
 image. Only the primary deployable gets a cluster smoke test.
 
+Point `extra_containers` at **self-authored, gate-reachable** images (your
+frontend/worker/sidecar Dockerfiles whose bases pull from `cgr.dev` and/or
+`registry1.dso.mil`). Do not use it to "scan" third-party DB/base images or
+private-mirror artifacts the runner cannot pull — those produce low-signal
+proxy scans, not approved-image attestation.
+
 **Format:** use a multiline YAML `|` block so each object is readable and
 diffable. Do not pack the array onto one quoted line — that form parses, but
 it does not scale past one extra image and is hard to review. Caller-lint
@@ -82,6 +88,18 @@ jobs:
     secrets: inherit
 ```
 
+## Scan boundary
+
+The gate builds and vulnerability-scans the image **as built with bases the
+runner can pull** (`cgr.dev` and/or `registry1.dso.mil`). Approved-image /
+OS-layer scanning for private-mirror or entitlement-unreachable bases is **out
+of scope** here — that stays with the consumer pipeline (IL5 / Game Warden /
+etc.).
+
+When `require_hardened_bases` is `false` (or bases are overridden to public
+substitutes), a green Vulnerability Scan is **not** proof the approved
+production image is clean; the job labels that run as a **proxy scan**.
+
 ## Field reference
 
 <!-- BEGIN GENERATED: security-gate-inputs -->
@@ -95,7 +113,7 @@ jobs:
 | `runtime_image` | string | `cgr.dev/chainguard/python:latest` | Runtime-stage base image, passed as the Dockerfile's RUNTIME_IMAGE build ARG; must match the runtime base ARG in the consumer's Dockerfile. |
 | `runtime_apks` | string | `""` | Extra runtime packages, passed as the Dockerfile's RUNTIME_APKS build ARG; set only when the consumer Dockerfile's runtime stage installs apks. |
 | `extra_build_args` | string | `""` | Newline-separated KEY=VALUE pairs appended to the Docker build-args — for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. PYTHON_DEV/PYTHON_RUN/NODE_DEV). |
-| `require_hardened_bases` | boolean | `true` | Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). |
+| `require_hardened_bases` | boolean | `true` | Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan — a green result is not proof the approved production image is clean. |
 | `ironbank_registry` | string | `registry1.dso.mil` | Iron Bank registry host used for docker login whenever IRONBANK_* secrets are set (alongside Chainguard when both are configured). Also used when primary-base failover swaps to ironbank_* images (CGR absent, Iron Bank present). Operator decision; defaults to the DoD registry. |
 | `ironbank_builder_image` | string | `""` | Optional Iron Bank replacement for builder_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's builder_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set. |
 | `ironbank_runtime_image` | string | `""` | Optional Iron Bank replacement for runtime_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set. |

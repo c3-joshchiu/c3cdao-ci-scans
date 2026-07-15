@@ -81,7 +81,7 @@ on:
         type: string
         default: ""
       require_hardened_bases:
-        description: "Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture)."
+        description: "Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan — a green result is not proof the approved production image is clean."
         type: boolean
         default: true
       ironbank_registry:
@@ -338,10 +338,21 @@ jobs:
               echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
               exit 1
             fi
-            echo "::warning::No hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login."
+            echo "::warning::Proxy-scan posture: no hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login. Vulnerability Scan will cover this gate-reachable image only; a green result is not proof the approved production image is clean."
           fi
           echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
           echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"
+
+      - name: Label proxy-scan posture
+        if: inputs.require_hardened_bases == false || inputs.require_hardened_bases == 'false'
+        run: |
+          msg='Proxy-scan posture (require_hardened_bases=false): phase1 builds the image with gate-reachable / consumer-specified bases. Downstream Vulnerability Scan is not an approved-prod attestation.'
+          echo "::warning::$msg"
+          {
+            echo "## Proxy-scan posture"
+            echo ""
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build scan image (local load, no push)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
@@ -902,6 +913,17 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
+      - name: Label proxy-scan posture
+        if: inputs.require_hardened_bases == false || inputs.require_hardened_bases == 'false'
+        run: |
+          msg='Proxy-scan posture (require_hardened_bases=false): this Vulnerability Scan covers the image as built with gate-reachable / consumer-specified bases. A green result is not proof the approved production image is clean — private-mirror / entitlement-unreachable OS-layer attestation stays with the consumer pipeline (IL5 / Game Warden / etc.).'
+          echo "::warning::$msg"
+          {
+            echo "## Proxy-scan posture"
+            echo ""
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Consumers aren't required to carry scanner config files — default to
       # empty ones so Trivy/Grype don't error on a missing path.
       - name: Default scanner configs when consumer lacks them
@@ -1071,10 +1093,21 @@ jobs:
               echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
               exit 1
             fi
-            echo "::warning::No hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login."
+            echo "::warning::Proxy-scan posture: no hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login. Vulnerability Scan will cover this gate-reachable image only; a green result is not proof the approved production image is clean."
           fi
           echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
           echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"
+
+      - name: Label proxy-scan posture
+        if: inputs.require_hardened_bases == false || inputs.require_hardened_bases == 'false'
+        run: |
+          msg='Proxy-scan posture (require_hardened_bases=false): build-extra builds with gate-reachable / consumer-specified bases. Downstream Vulnerability Scan extra is not an approved-prod attestation.'
+          echo "::warning::$msg"
+          {
+            echo "## Proxy-scan posture"
+            echo ""
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Base-image args come from the login step; the primary APP_*/RUNTIME_APKS
       # args are backend-specific, so extra containers carry their own overrides
@@ -1137,6 +1170,17 @@ jobs:
         container: ${{ fromJSON(inputs.extra_containers) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Label proxy-scan posture
+        if: inputs.require_hardened_bases == false || inputs.require_hardened_bases == 'false'
+        run: |
+          msg='Proxy-scan posture (require_hardened_bases=false): this Vulnerability Scan covers the image as built with gate-reachable / consumer-specified bases. A green result is not proof the approved production image is clean — private-mirror / entitlement-unreachable OS-layer attestation stays with the consumer pipeline (IL5 / Game Warden / etc.).'
+          echo "::warning::$msg"
+          {
+            echo "## Proxy-scan posture"
+            echo ""
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve leg image tag
         id: img

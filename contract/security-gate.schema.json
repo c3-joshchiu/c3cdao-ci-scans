@@ -105,7 +105,7 @@
     },
     "require_hardened_bases": {
       "default": true,
-      "description": "Hardened-base policy \u2014 operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch \u2014 the consumer explicitly owns that posture).",
+      "description": "Hardened-base policy \u2014 operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch \u2014 the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan \u2014 a green result is not proof the approved production image is clean.",
       "type": "boolean"
     },
     "runtime_apks": {

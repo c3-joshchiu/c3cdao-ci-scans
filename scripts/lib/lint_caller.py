@@ -18,7 +18,7 @@ Rule ids: no-secrets-inherit, no-caller-concurrency, unknown-input,
 type-mismatch, missing-secret-map, image-values-mismatch, unreadable-caller,
 extra-containers-json, extra-containers-name, extra-containers-duplicate,
 extra-containers-dockerfile, extra-containers-template-path,
-extra-containers-build-arg.
+extra-containers-target, extra-containers-build-arg.
 An unreadable caller (missing/unparseable file, or no job whose ``uses:``
 matches the reusable gate workflow) fails closed.
 """

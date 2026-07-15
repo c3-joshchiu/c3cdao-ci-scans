@@ -203,8 +203,11 @@ def check_extra_containers(with_map: dict[str, Any]) -> list[str]:
         return []
     raw = with_map["extra_containers"]
     if is_expression(raw):
-        notice("skip", "extra-containers-json", "value is an expression")
-        return []
+        return [
+            "extra-containers-json: extra_containers must be a literal JSON-array "
+            "string (expressions are not lintable; expand to a static JSON array "
+            "or use a multiline '|' block)"
+        ]
     if not isinstance(raw, str):
         return [
             "extra-containers-json: extra_containers must be a JSON-array string, "

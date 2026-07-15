@@ -795,6 +795,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [phase1-build]
     if: ${{ inputs.image_only != true && needs.phase1-build.result == 'success' }}
+    outputs:
+      smoke_ok: ${{ steps.smoke_outcome.outputs.ok }}
     env:
       CLUSTER: ${{ inputs.cluster_name }}
       NAMESPACE: ${{ inputs.namespace }}
@@ -827,8 +829,10 @@ jobs:
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
 
       - name: kind install + helm deploy + /health smoke
-        # Warn-only: advisory unless SECURITY_SCAN_BLOCKING=true. The job result
-        # still feeds security-gate, so a skipped/cancelled run fails the gate.
+        id: smoke
+        # Warn-only: advisory unless SECURITY_SCAN_BLOCKING=true. Step outcome is
+        # recorded below so security-gate can fail closed even when this step
+        # continues on error (job result stays success).
         continue-on-error: ${{ vars.SECURITY_SCAN_BLOCKING != 'true' }}
         env:
           IMAGE: ${{ needs.phase1-build.outputs.image }}
@@ -942,6 +946,15 @@ jobs:
           echo "GET ${HEALTH_PATH} -> ${code}"
           [ "${code}" = "200" ] || fail "${HEALTH_PATH} returned ${code}, expected 200"
           echo "smoke OK"
+
+      - name: Record smoke step outcome
+        id: smoke_outcome
+        if: always()
+        run: |
+          ok=false
+          if [ "${{ steps.smoke.outcome }}" = "success" ]; then ok=true; fi
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "cluster-smoke step outcome=${{ steps.smoke.outcome }} smoke_ok=$ok"
 
   # --------------------------------------------------------------------------
   # Vulnerability scan — Trivy + Grype × image + source SBOM (+ Grype image SBOM)
@@ -1327,5 +1340,15 @@ jobs:
           if bad:
               print('Blocking jobs not successful:', bad)
               sys.exit(1)
+          # cluster-smoke may continue-on-error when SECURITY_SCAN_BLOCKING!=true,
+          # leaving job result=success while the smoke step failed. Fail closed
+          # using the recorded step outcome when smoke is in the blocking set.
+          if 'cluster-smoke' in blocking:
+              smoke = needs.get('cluster-smoke') or {}
+              smoke_ok = (smoke.get('outputs') or {}).get('smoke_ok')
+              if smoke_ok != 'true':
+                  print('Blocking cluster-smoke step failed (smoke_ok=%r, result=%r)'
+                        % (smoke_ok, smoke.get('result')))
+                  sys.exit(1)
           print('All blocking security scans passed.')
           EOF

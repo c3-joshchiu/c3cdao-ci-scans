@@ -749,12 +749,31 @@ jobs:
         env:
           SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
         run: |
-          if [ -f Makefile ] && make -n -- "$SECCTX_MAKE_TARGET" >/dev/null 2>&1; then
+          set -uo pipefail
+          if [ ! -f Makefile ]; then
+            echo "::notice::no Makefile — running the gate's bundled restricted-PSS assertion"
+            uv run --with pyyaml python3 /tmp/ci-scans-assert-pss.py /tmp/rendered-chart.yaml
+            exit 0
+          fi
+          # Capture dry-run: missing target -> fallback; other make failures -> fail closed.
+          set +e
+          make_out=$(make -n -- "$SECCTX_MAKE_TARGET" 2>&1)
+          make_rc=$?
+          set -e
+          if [ "$make_rc" -eq 0 ]; then
             make -- "$SECCTX_MAKE_TARGET"
-          else
+            exit $?
+          fi
+          if printf '%s
+' "$make_out" | grep -Eqi "No rule to make target|No targets specified|No such file or directory"; then
             echo "::notice::consumer has no '${SECCTX_MAKE_TARGET}' make target — running the gate's bundled restricted-PSS assertion"
             uv run --with pyyaml python3 /tmp/ci-scans-assert-pss.py /tmp/rendered-chart.yaml
+            exit 0
           fi
+          echo "::error::make -n ${SECCTX_MAKE_TARGET} failed (not a missing-target); refusing PSS fallback"
+          printf '%s
+' "$make_out"
+          exit 1
 
   # --------------------------------------------------------------------------
   # Cluster smoke — kind + helm install + GET /health against the built image.

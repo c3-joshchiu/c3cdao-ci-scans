@@ -15,7 +15,7 @@ The gate assumes this app shape:
 
 - the app serves `GET /health` (cluster-smoke probes it after the helm install)
 - a single-image helm deploy — one backend image built, scanned, kind-loaded,
-  and installed (add `extra_containers` for frontend/sidecar images)
+  and installed (add `extra_containers` for self-authored, gate-reachable frontend/sidecar images)
 - an ASGI backend describable by the `app_*` inputs (`app_path`, `app_package`,
   `app_module`, `app_port`)
 
@@ -205,6 +205,20 @@ for mixed-base repos (e.g. Chainguard primary + Iron Bank `extra_containers`).
    second login.
 4. Neither credential → `require_hardened_bases: false` warns and builds on the
    consumer's own bases; otherwise fail (no silent public fallback).
+
+### Scan boundary (proxy vs approved image)
+
+The gate authenticates only to `cgr.dev` and `registry1.dso.mil`. It scans the
+image **as built with those gate-reachable bases**. If the approved production
+image uses a private mirror or entitlement the runner cannot reach, OS-layer /
+approved-image attestation is **out of scope** for this gate — keep that in the
+consumer IL5 / Game Warden (or equivalent) pipeline.
+
+- Prefer `extra_containers` for **self-authored, gate-reachable** images only.
+- When `require_hardened_bases: false` (pilot escape hatch / public substitutes),
+  phase1-build, build-extra, Vulnerability Scan, and Vulnerability Scan extra
+  emit a **proxy-scan** warning and job-summary label. Green ≠ approved prod
+  image clean.
 
 Consumers without a root `Makefile`/`security-helm-secctx` target get the gate's
 bundled restricted-PSS assertion in helm-check, and vuln-scan defaults empty

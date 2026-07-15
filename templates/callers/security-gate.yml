@@ -56,4 +56,5 @@ jobs:
       health_path: /health  # HTTP path cluster-smoke probes on the primary image (GET must return 200); e.g. /healthz, /api/health
       service_port: "8000"  # port cluster-smoke port-forwards to — the k8s Service's port, which may differ from app_port
       smoke_workload_match: backend  # case-insensitive substring identifying the backend Deployment/Service in cluster-smoke; set this if your deployment name has no 'backend'
+      image_only: false  # true: skip helm-check + cluster-smoke (image build/scan only); keep false for deployable apps
       extra_containers: ""  # extras to build + image-scan (JSON array). Prefer a multiline '|' block — one object per entry; never a single-line quoted array. "" = none. Shape: docs/INPUTS.md

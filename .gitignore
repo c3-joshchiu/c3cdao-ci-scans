@@ -19,11 +19,16 @@
 /.vscode/
 /.cursor/
 /.claude/
+/.skills
 /.skills/
+/.gemini/
 /.orchestra/
 /.tickets/
 /.env
 /.env.*
+
+# Linked git worktrees for parallel agent sessions (see AGENTS.md)
+.worktrees/
 
 # Python
 __pycache__/

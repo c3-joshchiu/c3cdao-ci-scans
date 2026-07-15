@@ -40,7 +40,7 @@
     },
     "extra_build_args": {
       "default": "",
-      "description": "Newline-separated KEY=VALUE pairs appended to the Docker build-args \u2014 for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. ppubs' PYTHON_DEV/PYTHON_RUN/NODE_DEV).",
+      "description": "Newline-separated KEY=VALUE pairs appended to the Docker build-args \u2014 for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. PYTHON_DEV/PYTHON_RUN/NODE_DEV).",
       "type": "string"
     },
     "extra_containers": {

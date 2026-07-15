@@ -53,6 +53,10 @@ on:
         description: "Path to the backend Dockerfile in the consumer repo."
         type: string
         default: containers/backend/Dockerfile
+      context:
+        description: "Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend)."
+        type: string
+        default: .
       builder_image:
         description: "Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile."
         type: string
@@ -331,7 +335,7 @@ jobs:
       - name: Build scan image (local load, no push)
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
         with:
-          context: .
+          context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
           push: false
           load: true   # load into local daemon so Syft can scan + we can save it

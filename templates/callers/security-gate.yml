@@ -34,6 +34,7 @@ jobs:
     with:
       scan_image: app:local  # local-daemon tag the image is built and scanned under; must equal the backend image tag in your helm values-local file (pullPolicy: Never pair)
       dockerfile: containers/backend/Dockerfile  # path to your backend Dockerfile
+      context: .  # Docker build context for the primary image; set to a subdirectory when the Dockerfile expects COPY from that tree
       builder_image: cgr.dev/chainguard/python:latest-dev  # build-stage base image (BUILDER_IMAGE build ARG); must match your Dockerfile's builder base ARG
       runtime_image: cgr.dev/chainguard/python:latest  # runtime-stage base image (RUNTIME_IMAGE build ARG); must match your Dockerfile's runtime base ARG
       runtime_apks: ""  # extra runtime packages (RUNTIME_APKS build ARG); set only if your Dockerfile's runtime stage installs apks

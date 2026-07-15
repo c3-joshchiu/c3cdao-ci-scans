@@ -89,6 +89,7 @@ jobs:
 | --- | --- | --- | --- |
 | `scan_image` | string | `app:local` | Local-daemon tag the image is built and scanned under; must match the backend image tag in the consumer's helm values-local file (the pullPolicy: Never pair — cluster-smoke kind-loads this exact tag). |
 | `dockerfile` | string | `containers/backend/Dockerfile` | Path to the backend Dockerfile in the consumer repo. |
+| `context` | string | `.` | Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend). |
 | `builder_image` | string | `cgr.dev/chainguard/python:latest-dev` | Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile. |
 | `runtime_image` | string | `cgr.dev/chainguard/python:latest` | Runtime-stage base image, passed as the Dockerfile's RUNTIME_IMAGE build ARG; must match the runtime base ARG in the consumer's Dockerfile. |
 | `runtime_apks` | string | `""` | Extra runtime packages, passed as the Dockerfile's RUNTIME_APKS build ARG; set only when the consumer Dockerfile's runtime stage installs apks. |

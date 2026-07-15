@@ -180,7 +180,10 @@ and lints it against the published contract before anything scans. Rule ids:
 prefer a multiline YAML `|` block (see [INPUTS.md](INPUTS.md)). Rules skipped
 for a stated reason announce on stderr (`notice: skip: image-values-mismatch:
 --consumer-root not given`); with a consumer checkout supplied, the values-file
-rule announces `notice: active: image-values-mismatch: checked <path>`. Run it
+rule announces `notice: active: image-values-mismatch: checked <path>`. The
+check parses values-local as YAML: a string `image` equal to `scan_image`, or
+`repository` + `tag` that join to it, both pass; a comment-only mention does not.
+Run it
 locally:
 
 ```bash

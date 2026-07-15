@@ -688,71 +688,29 @@ jobs:
       # keep it; consumers without one (e.g. no root Makefile) fall back to
       # the gate's bundled checker below, so onboarding never requires
       # consumer-side tooling.
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//')"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ steps.calleeref.outputs.ref }}
+          path: .ci-scans
+
       - name: Set up uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
-      - name: Write bundled restricted-PSS checker
-        run: |
-          cat > /tmp/ci-scans-assert-pss.py <<'PYEOF'
-          """Assert restricted-PSS securityContext rows on rendered chart YAML.
 
-          For every pod spec in the render (Deployment/StatefulSet/DaemonSet/
-          ReplicaSet/Job/CronJob/Pod), each container and initContainer must
-          have, at container or pod level:
-            - runAsNonRoot: true
-            - allowPrivilegeEscalation: false
-            - capabilities.drop containing ALL (container level)
-            - seccompProfile.type RuntimeDefault or Localhost
-          """
-          import sys
-          import yaml
-
-          WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "Pod"}
-
-          def pod_specs(doc):
-              kind = doc.get("kind")
-              meta = doc.get("metadata", {}).get("name", "?")
-              if kind == "Pod":
-                  yield kind, meta, doc.get("spec", {})
-              elif kind in WORKLOAD_KINDS:
-                  yield kind, meta, doc.get("spec", {}).get("template", {}).get("spec", {})
-              elif kind == "CronJob":
-                  yield kind, meta, (doc.get("spec", {}).get("jobTemplate", {})
-                                     .get("spec", {}).get("template", {}).get("spec", {}))
-
-          def check(path):
-              errors = []
-              with open(path) as f:
-                  docs = [d for d in yaml.safe_load_all(f) if isinstance(d, dict)]
-              checked = 0
-              for doc in docs:
-                  for kind, name, spec in pod_specs(doc):
-                      pod_sc = spec.get("securityContext") or {}
-                      for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
-                          checked += 1
-                          where = f"{kind}/{name} container={c.get('name', '?')}"
-                          sc = c.get("securityContext") or {}
-                          def level(key):
-                              return sc.get(key, pod_sc.get(key))
-                          if level("runAsNonRoot") is not True:
-                              errors.append(f"{where}: runAsNonRoot must be true")
-                          if sc.get("allowPrivilegeEscalation") is not False:
-                              errors.append(f"{where}: allowPrivilegeEscalation must be false")
-                          drops = [str(x).upper() for x in (sc.get("capabilities") or {}).get("drop") or []]
-                          if "ALL" not in drops:
-                              errors.append(f"{where}: capabilities.drop must include ALL")
-                          seccomp = (level("seccompProfile") or {}).get("type")
-                          if seccomp not in ("RuntimeDefault", "Localhost"):
-                              errors.append(f"{where}: seccompProfile.type must be RuntimeDefault or Localhost")
-              if checked == 0:
-                  errors.append("no pod specs found in rendered chart — nothing was asserted")
-              for e in errors:
-                  print(f"::error::restricted-PSS: {e}")
-              print(f"restricted-PSS: {checked} container(s) checked, {len(errors)} violation(s)")
-              return 1 if errors else 0
-
-          if __name__ == "__main__":
-              sys.exit(check(sys.argv[1]))
-          PYEOF
       - name: Assert rendered pod-security controls (restricted PSS)
         env:
           SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
@@ -760,10 +718,9 @@ jobs:
           set -uo pipefail
           if [ ! -f Makefile ]; then
             echo "::notice::no Makefile — running the gate's bundled restricted-PSS assertion"
-            uv run --with pyyaml python3 /tmp/ci-scans-assert-pss.py /tmp/rendered-chart.yaml
+            uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
             exit 0
           fi
-          # Capture dry-run: missing target -> fallback; other make failures -> fail closed.
           set +e
           make_out=$(make -n -- "$SECCTX_MAKE_TARGET" 2>&1)
           make_rc=$?
@@ -772,15 +729,13 @@ jobs:
             make -- "$SECCTX_MAKE_TARGET"
             exit $?
           fi
-          if printf '%s
-' "$make_out" | grep -Eqi "No rule to make target|No targets specified|No such file or directory"; then
+          if printf '%s\n' "$make_out" | grep -Eqi "No rule to make target|No targets specified|No such file or directory"; then
             echo "::notice::consumer has no '${SECCTX_MAKE_TARGET}' make target — running the gate's bundled restricted-PSS assertion"
-            uv run --with pyyaml python3 /tmp/ci-scans-assert-pss.py /tmp/rendered-chart.yaml
+            uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
             exit 0
           fi
           echo "::error::make -n ${SECCTX_MAKE_TARGET} failed (not a missing-target); refusing PSS fallback"
-          printf '%s
-' "$make_out"
+          printf '%s\n' "$make_out"
           exit 1
 
   # --------------------------------------------------------------------------
@@ -1298,57 +1253,16 @@ jobs:
     needs: [caller-lint, phase1-build, secrets-scan, sast-semgrep, sast-sonarqube, helm-check, cluster-smoke, vuln-scan, build-extra, vuln-scan-extra]
     if: always()
     steps:
+      # job_workflow_sha is the commit of this reusable workflow (the pin).
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ github.job_workflow_sha }}
+          path: .ci-scans
+
       - name: Evaluate scan results
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
           EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
           IMAGE_ONLY: ${{ inputs.image_only }}
-        run: |
-          python3 << 'EOF'
-          import sys, json, os
-          needs = json.loads(os.environ['NEEDS_JSON'])
-          # Blocking jobs must each report result == 'success'. We deliberately
-          # check for NON-success (not just 'failure') so that a job which is
-          # skipped or cancelled — e.g. vuln-scan/cluster-smoke skipped because
-          # phase1-build died — fails the gate instead of silently passing.
-          # A broken build can never sign off green.
-          #
-          # sast-semgrep / sast-sonarqube are continue-on-error (warn-only):
-          # their result is 'success' regardless of findings, so they're
-          # excluded here and surface only in their logs.
-          blocking = ['caller-lint', 'phase1-build', 'secrets-scan', 'vuln-scan']
-          # helm-check / cluster-smoke use the SAME predicate as their job `if:`
-          # (`inputs.image_only != true`). When image_only is true those jobs
-          # skip — omit them here or a skipped result would false-fail the gate.
-          # Default false keeps app callers byte-identical (both still blocking).
-          if (os.environ.get('IMAGE_ONLY') or '').lower() != 'true':
-              blocking[3:3] = ['helm-check', 'cluster-smoke']
-          # build-extra / vuln-scan-extra are blocking ONLY when the consumer
-          # declared extra containers. Use the SAME predicate that gates those
-          # jobs (`if: inputs.extra_containers != '' && != '[]'`) — NOT a JSON
-          # parse. A parse would default to "not blocking" on malformed input
-          # (e.g. an expression that resolves to 'not-json' / '{}' / 'null'),
-          # while the jobs still run and fail at fromJSON matrix expansion —
-          # excluding a real failure from this required check and letting it go
-          # green. Single source of truth; fail-closed on malformed input.
-          # (Empty → jobs skip → correctly excluded here.)
-          extra = os.environ.get('EXTRA_CONTAINERS') or ''
-          if extra not in ('', '[]'):
-              blocking += ['build-extra', 'vuln-scan-extra']
-          bad = {k: needs.get(k, {}).get('result') for k in blocking
-                 if needs.get(k, {}).get('result') != 'success'}
-          if bad:
-              print('Blocking jobs not successful:', bad)
-              sys.exit(1)
-          # cluster-smoke may continue-on-error when SECURITY_SCAN_BLOCKING!=true,
-          # leaving job result=success while the smoke step failed. Fail closed
-          # using the recorded step outcome when smoke is in the blocking set.
-          if 'cluster-smoke' in blocking:
-              smoke = needs.get('cluster-smoke') or {}
-              smoke_ok = (smoke.get('outputs') or {}).get('smoke_ok')
-              if smoke_ok != 'true':
-                  print('Blocking cluster-smoke step failed (smoke_ok=%r, result=%r)'
-                        % (smoke_ok, smoke.get('result')))
-                  sys.exit(1)
-          print('All blocking security scans passed.')
-          EOF
+        run: python3 .ci-scans/scripts/lib/evaluate_security_gate.py

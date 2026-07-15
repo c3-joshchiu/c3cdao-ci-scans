@@ -57,6 +57,10 @@ on:
         description: "Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend)."
         type: string
         default: .
+      target:
+        description: "Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage — set explicitly when a trailing dev/debug/test stage would otherwise win."
+        type: string
+        default: ""
       builder_image:
         description: "Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile."
         type: string
@@ -146,7 +150,7 @@ on:
         type: string
         default: backend
       extra_containers:
-        description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra."
+        description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), target (optional stage name), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra."
         type: string
         default: ""
     secrets:
@@ -337,6 +341,7 @@ jobs:
         with:
           context: ${{ inputs.context }}
           file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
           push: false
           load: true   # load into local daemon so Syft can scan + we can save it
           tags: ${{ env.SCAN_IMAGE }}
@@ -1071,6 +1076,7 @@ jobs:
         with:
           context: ${{ matrix.container.context || '.' }}
           file: ${{ matrix.container.dockerfile }}
+          target: ${{ matrix.container.target }}
           push: false
           load: true
           tags: ${{ steps.img.outputs.tag }}

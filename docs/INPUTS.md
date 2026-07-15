@@ -105,7 +105,7 @@ production image is clean; the job labels that run as a **proxy scan**.
 <!-- BEGIN GENERATED: security-gate-inputs -->
 | Input | Type | Default | Where the value comes from |
 | --- | --- | --- | --- |
-| `scan_image` | string | `app:local` | Local-daemon tag the image is built and scanned under; must match the backend image tag in the consumer's helm values-local file (the pullPolicy: Never pair — cluster-smoke kind-loads this exact tag). |
+| `scan_image` | string | `app:local` | Local-daemon tag the image is built and scanned under; caller-lint requires it to equal a parsed values-local image string or repository:tag join (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never. |
 | `dockerfile` | string | `containers/backend/Dockerfile` | Path to the backend Dockerfile in the consumer repo. |
 | `context` | string | `.` | Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend). |
 | `target` | string | `""` | Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage — set explicitly when a trailing dev/debug/test stage would otherwise win. |
@@ -119,7 +119,7 @@ production image is clean; the job labels that run as a **proxy scan**.
 | `ironbank_runtime_image` | string | `""` | Optional Iron Bank replacement for runtime_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set. |
 | `helm_chart_path` | string | `helm/app` | Path to the consumer's helm chart directory — the helm lint/template target and the cluster-smoke install source. |
 | `helm_values_file` | string | `helm/app/values.yaml` | Path to the consumer chart's base values file, used by helm lint and template. |
-| `helm_values_local_file` | string | `helm/app/values-local.yaml` | Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install; its backend image tag must equal scan_image with pullPolicy: Never. |
+| `helm_values_local_file` | string | `helm/app/values-local.yaml` | Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install. Parsed YAML must pin the backend image to scan_image (string image or repository+tag); comments do not count. Use pullPolicy: Never for cluster-smoke. |
 | `helm_release_name` | string | `app-ci` | Helm release name for template and the cluster-smoke install; operator choice, no consumer-file counterpart. |
 | `cluster_name` | string | `app-ci` | kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart. |
 | `namespace` | string | `app-ci` | Kubernetes namespace cluster-smoke deploys the release into; operator choice, no consumer-file counterpart. |

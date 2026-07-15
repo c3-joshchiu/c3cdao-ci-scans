@@ -50,7 +50,7 @@
     },
     "extra_containers": {
       "default": "",
-      "description": "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable \u2014 one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra.",
+      "description": "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable \u2014 one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), target (optional stage name), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra.",
       "type": "string"
     },
     "health_path": {
@@ -136,6 +136,11 @@
     "smoke_workload_match": {
       "default": "backend",
       "description": "Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts).",
+      "type": "string"
+    },
+    "target": {
+      "default": "",
+      "description": "Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage \u2014 set explicitly when a trailing dev/debug/test stage would otherwise win.",
       "type": "string"
     }
   },

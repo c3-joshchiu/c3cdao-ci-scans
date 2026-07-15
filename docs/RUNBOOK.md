@@ -175,7 +175,7 @@ and lints it against the published contract before anything scans. Rule ids:
 `extra_containers` entry validators `extra-containers-json`,
 `extra-containers-name`, `extra-containers-duplicate`,
 `extra-containers-dockerfile`, `extra-containers-template-path`,
-`extra-containers-build-arg`. A non-failing style notice
+`extra-containers-target`, `extra-containers-build-arg`. A non-failing style notice
 `extra-containers-format` fires when the array is packed onto one quoted line —
 prefer a multiline YAML `|` block (see [INPUTS.md](INPUTS.md)). Rules skipped
 for a stated reason announce on stderr (`notice: skip: image-values-mismatch:

@@ -25,7 +25,7 @@ jobs:
         run: uv run scripts/lib/extract_contract.py
       - name: Fail on contract drift
         run: |
-          git diff --exit-code contract/ README.md || { echo "::error::contract drift — run 'uv run scripts/lib/extract_contract.py' and commit the regenerated files"; exit 1; }
+          git diff --exit-code contract/ docs/INPUTS.md || { echo "::error::contract drift — run 'uv run scripts/lib/extract_contract.py' and commit the regenerated files"; exit 1; }
 
   caller-lint-fixtures:
     runs-on: ubuntu-latest

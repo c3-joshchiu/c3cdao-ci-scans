@@ -31,6 +31,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from extract_contract import load_gha_workflow
 
 GATE_WORKFLOW_BASENAME = "reusable-security-gate.yml"
@@ -92,12 +94,39 @@ def contract_value(with_map: dict[str, Any], props: dict[str, Any], key: str) ->
     return (props.get(key) or {}).get("default")
 
 
+def _image_mapping_pins(mapping: dict[str, Any], scan_image: str) -> bool:
+    """True when a Helm-style image map joins to ``scan_image``."""
+    repo = mapping.get("repository")
+    tag = mapping.get("tag")
+    if not isinstance(repo, str) or tag is None or isinstance(tag, (dict, list)):
+        return False
+    return f"{repo}:{tag}" == scan_image
+
+
+def values_pin_scan_image(node: Any, scan_image: str) -> bool:
+    """True if parsed values pin ``scan_image`` via ``image`` string or map.
+
+    Accepts ``image: repo:tag`` strings and ``image: {repository, tag}`` maps
+    (including nested ``*.image``). Comments are invisible to the YAML parse.
+    """
+    if isinstance(node, dict):
+        image = node.get("image")
+        if isinstance(image, str) and image == scan_image:
+            return True
+        if isinstance(image, dict) and _image_mapping_pins(image, scan_image):
+            return True
+        return any(values_pin_scan_image(v, scan_image) for v in node.values())
+    if isinstance(node, list):
+        return any(values_pin_scan_image(v, scan_image) for v in node)
+    return False
+
+
 def check_image_values(
     with_map: dict[str, Any],
     props: dict[str, Any],
     consumer_root: Path | None,
 ) -> list[str]:
-    """scan_image must appear in the consumer's values-local file text."""
+    """scan_image must be pinned in the consumer's values-local YAML."""
     rule = "image-values-mismatch"
     image_only = contract_value(with_map, props, "image_only")
     if image_only is True:
@@ -128,9 +157,13 @@ def check_image_values(
             f"{rule}: values file '{values_file}' unreadable under consumer root '{consumer_root}': {e}"
         ]
     notice("active", rule, f"checked {values_path}")
-    if str(scan_image) not in text:
-        return [f"{rule}: scan_image '{scan_image}' not found in {values_path}"]
-    return []
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        return [f"{rule}: values file '{values_path}' is not valid YAML: {e}"]
+    if values_pin_scan_image(data, str(scan_image)):
+        return []
+    return [f"{rule}: scan_image '{scan_image}' not found in {values_path}"]
 
 
 # extra_containers per-entry validation. The contract only sees the flat

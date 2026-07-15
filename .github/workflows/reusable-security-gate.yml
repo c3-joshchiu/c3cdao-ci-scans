@@ -656,13 +656,22 @@ jobs:
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
 
       - name: Build chart dependencies
-        run: helm dependency build ./${{ inputs.helm_chart_path }}
+        env:
+          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
+        run: helm dependency build "./${HELM_CHART_PATH}"
 
       - name: helm lint
-        run: helm lint ./${{ inputs.helm_chart_path }} -f ${{ inputs.helm_values_file }}
+        env:
+          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
+          HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
+        run: helm lint "./${HELM_CHART_PATH}" -f "${HELM_VALUES_FILE}"
 
       - name: helm template (render check)
-        run: helm template ${{ inputs.helm_release_name }} ./${{ inputs.helm_chart_path }} -f ${{ inputs.helm_values_file }} > /tmp/rendered-chart.yaml
+        env:
+          HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
+          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
+          HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
+        run: helm template "${HELM_RELEASE_NAME}" "./${HELM_CHART_PATH}" -f "${HELM_VALUES_FILE}" > /tmp/rendered-chart.yaml
 
       # Restricted-PSS assertion on the rendered releases — a machine-checkable
       # re-scan of the templated securityContext rows. Ported from the modular
@@ -737,11 +746,13 @@ jobs:
               sys.exit(check(sys.argv[1]))
           PYEOF
       - name: Assert rendered pod-security controls (restricted PSS)
+        env:
+          SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
         run: |
-          if [ -f Makefile ] && make -n ${{ inputs.secctx_make_target }} >/dev/null 2>&1; then
-            make ${{ inputs.secctx_make_target }}
+          if [ -f Makefile ] && make -n -- "$SECCTX_MAKE_TARGET" >/dev/null 2>&1; then
+            make -- "$SECCTX_MAKE_TARGET"
           else
-            echo "::notice::consumer has no '${{ inputs.secctx_make_target }}' make target — running the gate's bundled restricted-PSS assertion"
+            echo "::notice::consumer has no '${SECCTX_MAKE_TARGET}' make target — running the gate's bundled restricted-PSS assertion"
             uv run --with pyyaml python3 /tmp/ci-scans-assert-pss.py /tmp/rendered-chart.yaml
           fi
 
@@ -798,6 +809,10 @@ jobs:
           SERVICE_PORT: ${{ inputs.service_port }}
           HEALTH_PATH: ${{ inputs.health_path }}
           SMOKE_WORKLOAD_MATCH: ${{ inputs.smoke_workload_match }}
+          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
+          HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
+          HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
+          HELM_VALUES_LOCAL_FILE: ${{ inputs.helm_values_local_file }}
         run: |
           set -uo pipefail
           fail() { echo "::warning::cluster-smoke: $1"; exit 1; }
@@ -850,17 +865,17 @@ jobs:
             https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
             || fail "gateway-api CRD install failed"
 
-          helm dependency build ./${{ inputs.helm_chart_path }} || fail "helm dependency build failed"
+          helm dependency build "./${HELM_CHART_PATH}" || fail "helm dependency build failed"
 
           # Install the app. The post-install migration hook runs alembic against
           # the Postgres above (from the backend image, pullPolicy Never — hence
           # SCAN_IMAGE must equal values-local's scan_image). Frontend
           # image isn't built here, so don't --wait on the whole release; we gate
           # on the backend rollout explicitly.
-          helm install ${{ inputs.helm_release_name }} ./${{ inputs.helm_chart_path }} \
+          helm install "${HELM_RELEASE_NAME}" "./${HELM_CHART_PATH}" \
             -n "${NAMESPACE}" \
-            -f ${{ inputs.helm_values_file }} \
-            -f ${{ inputs.helm_values_local_file }} \
+            -f "${HELM_VALUES_FILE}" \
+            -f "${HELM_VALUES_LOCAL_FILE}" \
             --timeout 5m || {
               echo "=== helm install failed — cluster diagnostics ==="
               kubectl -n "${NAMESPACE}" get pods,jobs -o wide || true

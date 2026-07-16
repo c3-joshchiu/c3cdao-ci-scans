@@ -708,8 +708,11 @@ jobs:
           ref: ${{ steps.calleeref.outputs.ref }}
           path: .ci-scans
 
-      # Probe selects bundled vs consumer make path only. helm-check always
-      # installs uv afterward — both paths need it today. Fail-closed:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+
+      # Probe selects bundled vs consumer make path only, after runner uv is
+      # available for Makefiles that do parse-time uv work. Fail-closed:
       # missing Makefile / missing target → bundled; other make -n
       # failures → job error.
       - name: Probe consumer secctx make target
@@ -740,8 +743,6 @@ jobs:
           printf '%s\n' "$make_out"
           exit 1
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
 
       - name: Assert rendered pod-security controls (restricted PSS)
         env:

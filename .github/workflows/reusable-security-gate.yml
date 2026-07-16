@@ -121,7 +121,7 @@ on:
         type: string
         default: app-ci
       secctx_make_target:
-        description: "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it."
+        description: "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path — do not assume the caller preinstalled uv."
         type: string
         default: security-helm-secctx
       app_path:
@@ -711,14 +711,19 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
 
-      - name: Assert rendered pod-security controls (restricted PSS)
+      # Probe selects bundled vs consumer make path only, after runner uv is
+      # available for Makefiles that do parse-time uv work. Fail-closed:
+      # missing Makefile / missing target → bundled; other make -n
+      # failures → job error.
+      - name: Probe consumer secctx make target
+        id: secctx
         env:
           SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
         run: |
           set -uo pipefail
           if [ ! -f Makefile ]; then
-            echo "::notice::no Makefile — running the gate's bundled restricted-PSS assertion"
-            uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
+            echo "use_bundled=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::no Makefile — will run the gate's bundled restricted-PSS assertion"
             exit 0
           fi
           set +e
@@ -726,17 +731,34 @@ jobs:
           make_rc=$?
           set -e
           if [ "$make_rc" -eq 0 ]; then
-            make -- "$SECCTX_MAKE_TARGET"
-            exit $?
+            echo "use_bundled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if printf '%s\n' "$make_out" | grep -Eqi "No rule to make target|No targets specified|No such file or directory"; then
-            echo "::notice::consumer has no '${SECCTX_MAKE_TARGET}' make target — running the gate's bundled restricted-PSS assertion"
-            uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
+            echo "use_bundled=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::consumer has no '${SECCTX_MAKE_TARGET}' make target — will run the gate's bundled restricted-PSS assertion"
             exit 0
           fi
           echo "::error::make -n ${SECCTX_MAKE_TARGET} failed (not a missing-target); refusing PSS fallback"
           printf '%s\n' "$make_out"
           exit 1
+
+
+      - name: Assert rendered pod-security controls (restricted PSS)
+        env:
+          SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
+          USE_BUNDLED: ${{ steps.secctx.outputs.use_bundled }}
+        run: |
+          set -uo pipefail
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "::error::helm-check requires uv on the runner before secctx assert (make or bundled); setup-uv did not provide it"
+            exit 1
+          fi
+          if [ "$USE_BUNDLED" = "true" ]; then
+            uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
+            exit 0
+          fi
+          make -- "$SECCTX_MAKE_TARGET"
 
   # --------------------------------------------------------------------------
   # Cluster smoke — kind + helm install + GET /health against the built image.

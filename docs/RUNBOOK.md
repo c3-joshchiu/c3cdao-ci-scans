@@ -226,6 +226,8 @@ consumer IL5 / Game Warden (or equivalent) pipeline.
 Consumers without a root `Makefile`/`security-helm-secctx` target get the gate's
 bundled restricted-PSS assertion in helm-check, and vuln-scan defaults empty
 `.trivyignore`/`.grype.yaml` when the consumer doesn't carry them.
+`helm-check` owns runner `uv` before either the consumer make or bundled PSS
+path; Makefile targets must not assume the caller preinstalled it.
 
 ## Updating the reusable workflow
 

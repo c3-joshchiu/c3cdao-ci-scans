@@ -123,7 +123,7 @@ production image is clean; the job labels that run as a **proxy scan**.
 | `helm_release_name` | string | `app-ci` | Helm release name for template and the cluster-smoke install; operator choice, no consumer-file counterpart. |
 | `cluster_name` | string | `app-ci` | kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart. |
 | `namespace` | string | `app-ci` | Kubernetes namespace cluster-smoke deploys the release into; operator choice, no consumer-file counterpart. |
-| `secctx_make_target` | string | `security-helm-secctx` | Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. |
+| `secctx_make_target` | string | `security-helm-secctx` | Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path — do not assume the caller preinstalled uv. |
 | `app_path` | string | `apps/app/backend` | Consumer repo path to the backend app directory, passed as the Dockerfile's APP_PATH build ARG. |
 | `app_package` | string | `app-backend` | Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata. |
 | `app_module` | string | `app.main:app` | ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object. |

@@ -121,7 +121,7 @@ on:
         type: string
         default: app-ci
       secctx_make_target:
-        description: "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it."
+        description: "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path — do not assume the caller preinstalled uv."
         type: string
         default: security-helm-secctx
       app_path:
@@ -708,11 +708,10 @@ jobs:
           ref: ${{ steps.calleeref.outputs.ref }}
           path: .ci-scans
 
-      # Cheap probe before setup-uv: only install uv when the bundled
-      # assert_restricted_pss.py path will run. Consumers whose Makefile
-      # owns secctx skip uv entirely. Fail-closed classification matches
-      # the prior in-assert logic (F-004): missing Makefile / missing
-      # target → bundled; other make -n failures → job error.
+      # Probe selects bundled vs consumer make path only. helm-check always
+      # installs uv afterward — both paths need it today. Fail-closed:
+      # missing Makefile / missing target → bundled; other make -n
+      # failures → job error.
       - name: Probe consumer secctx make target
         id: secctx
         env:
@@ -742,7 +741,6 @@ jobs:
           exit 1
 
       - name: Set up uv
-        if: steps.secctx.outputs.use_bundled == 'true'
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
 
       - name: Assert rendered pod-security controls (restricted PSS)
@@ -751,6 +749,10 @@ jobs:
           USE_BUNDLED: ${{ steps.secctx.outputs.use_bundled }}
         run: |
           set -uo pipefail
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "::error::helm-check requires uv on the runner before secctx assert (make or bundled); setup-uv did not provide it"
+            exit 1
+          fi
           if [ "$USE_BUNDLED" = "true" ]; then
             uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
             exit 0

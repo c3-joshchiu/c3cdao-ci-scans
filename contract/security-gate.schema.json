@@ -125,7 +125,7 @@
     },
     "secctx_make_target": {
       "default": "security-helm-secctx",
-      "description": "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it.",
+      "description": "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path \u2014 do not assume the caller preinstalled uv.",
       "type": "string"
     },
     "service_port": {

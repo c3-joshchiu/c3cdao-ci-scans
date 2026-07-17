@@ -262,8 +262,9 @@ jobs:
             --consumer-root "$GITHUB_WORKSPACE"
 
       # Presence-only check: at least one complete registry pair (token AND
-      # username). Token-only would pass here then fail at docker login in
-      # build jobs after they already started — defeating fail-fast.
+      # username). Secrets stay in the env block (Actions auto-redacts
+      # ${{ secrets.* }} in logs). Never echo/printenv/declare values; never
+      # enable xtrace (-x); error text names secret *keys* only.
       - name: Check hardened-registry secrets present
         if: inputs.require_hardened_bases == true || inputs.require_hardened_bases == 'true'
         env:
@@ -272,22 +273,26 @@ jobs:
           IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
           IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
         run: |
+          # Intentionally no -x: xtrace would print expansions containing secrets.
           set -euo pipefail
-          cgr_ok=0
-          ib_ok=0
-          if [ -n "${CGR_PULL_TOKEN:-}" ] && [ -n "${CGR_PULL_USERNAME:-}" ]; then
-            cgr_ok=1
-          elif [ -n "${CGR_PULL_TOKEN:-}" ] || [ -n "${CGR_PULL_USERNAME:-}" ]; then
+          set +x
+
+          # Boolean presence only — do not interpolate secret values into stdout.
+          cgr_tok=0; cgr_user=0; ib_tok=0; ib_user=0
+          [ -n "${CGR_PULL_TOKEN:-}" ] && cgr_tok=1
+          [ -n "${CGR_PULL_USERNAME:-}" ] && cgr_user=1
+          [ -n "${IRONBANK_TOKEN:-}" ] && ib_tok=1
+          [ -n "${IRONBANK_USERNAME:-}" ] && ib_user=1
+
+          if [ "$cgr_tok" != "$cgr_user" ]; then
             echo "::error::Incomplete Chainguard credentials — both CGR_PULL_TOKEN and CGR_PULL_USERNAME are required for docker login."
             exit 1
           fi
-          if [ -n "${IRONBANK_TOKEN:-}" ] && [ -n "${IRONBANK_USERNAME:-}" ]; then
-            ib_ok=1
-          elif [ -n "${IRONBANK_TOKEN:-}" ] || [ -n "${IRONBANK_USERNAME:-}" ]; then
+          if [ "$ib_tok" != "$ib_user" ]; then
             echo "::error::Incomplete Iron Bank credentials — both IRONBANK_TOKEN and IRONBANK_USERNAME are required for docker login."
             exit 1
           fi
-          if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 0 ]; then
+          if [ "$cgr_tok" = 0 ] && [ "$ib_tok" = 0 ]; then
             echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
             exit 1
           fi

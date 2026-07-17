@@ -169,7 +169,10 @@ needs:
 - Secrets passed **explicitly**, never the `inherit` form (see §3).
 
 `caller-lint` is a fail-closed configuration pre-flight: it resolves your caller
-and lints it against the published contract before anything scans. Rule ids:
+and lints it against the published contract before anything scans. When
+`require_hardened_bases` is true (default), it also fails closed if neither
+Chainguard (`CGR_PULL_*`) nor Iron Bank (`IRONBANK_*`) pull tokens are present,
+so docker/kind never start on a missing-credentials run. Rule ids:
 `no-secrets-inherit`, `no-caller-concurrency`, `unknown-input`, `type-mismatch`,
 `missing-secret-map`, `image-values-mismatch`, `unreadable-caller`, plus the
 `extra_containers` entry validators `extra-containers-json`,
@@ -191,6 +194,20 @@ uv run scripts/lib/lint_caller.py <caller.yml> \
   --contract contract/security-gate.schema.json \
   [--consumer-root <consumer-checkout>]
 ```
+
+## Job order and fail-fast (Actions minutes)
+
+Gate jobs are ordered so cheap failures stop expensive work from starting:
+
+1. **`caller-lint`** — caller contract + (when `require_hardened_bases`) hardened-registry secret presence.
+2. **`helm-check`** (unless `image_only`) — helm lint/template + restricted PSS — in parallel with SAST/secrets-scan.
+3. **`phase1-build` / `build-extra`** — docker image builds — **need** successful `caller-lint` and, when helm runs, successful `helm-check`. A PSS failure does not start multi-minute image builds.
+4. **`cluster-smoke` / `vuln-scan`** — need a successful primary image build (unchanged).
+
+This is DAG `needs:` wiring, not in-job cancellation. Prior runs on the same ref are still cancelled by workflow `concurrency:`.
+
+**Fleet testing:** canary **one** consumer through a pin/secrets change before fanning out many repos. Do not re-trigger a full multi-repo Security Scan matrix until the canary's real fail mode is fixed.
+
 
 ## Hardened-base registry login (phase1-build + build-extra)
 

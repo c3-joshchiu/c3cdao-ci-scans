@@ -4,19 +4,21 @@
 # status check, instead of several independent modular scan workflows.
 #
 # Structure:
-#   caller-lint       resolves the consumer's caller workflow file from
-#                     github.workflow_ref and lints it against the published
-#                     contract (contract/security-gate.schema.json) — fail
-#                     closed. Every scan job needs it, so a hand-edited caller
-#                     that regresses the scaffold invariants never scans.
-#   phase1-build      builds the backend image once, generates its image SBOM,
-#                     and hands the image to downstream jobs as a transient
-#                     `docker save` tarball uploaded via actions/upload-artifact.
-#                     No registry round-trip — the image never leaves the run.
+#   caller-lint       configuration pre-flight: lint the consumer caller against
+#                     the published contract, then (when require_hardened_bases)
+#                     fail closed if neither CGR nor Iron Bank pull secrets are
+#                     present. Every scan job needs it.
 #   secrets-scan      TruffleHog (parallel after caller-lint)
 #   sast-semgrep      Semgrep (parallel, warn-only until baseline)
 #   sast-sonarqube    SonarQube ephemeral (parallel, warn-only until baseline)
-#   helm-check        helm lint + template (parallel; blocking unless image_only)
+#   helm-check        helm lint + template + restricted PSS (after caller-lint;
+#                     blocking unless image_only)
+#   phase1-build      builds the backend image once, generates its image SBOM,
+#                     and hands the image to downstream jobs as a transient
+#                     `docker save` tarball uploaded via actions/upload-artifact.
+#                     needs: caller-lint + helm-check (skips docker when PSS/helm
+#                     already failed; when image_only, helm-check is skipped and
+#                     builds proceed after caller-lint alone)
 #   cluster-smoke     kind + helm install + GET /health against the built image
 #                     (needs: phase1-build) — proves the image actually boots;
 #                     skipped when image_only
@@ -201,12 +203,11 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # Caller lint — validate the consumer's caller file against the published
-  # contract before anything scans. The caller is read from the consumer
-  # checkout (github.workflow_ref names it); the lint tooling + contract are
-  # checked out at the exact reusable-workflow ref in use
-  # (github.job_workflow_sha). Fail closed: an unresolvable caller file or an
-  # unreadable caller is a lint failure, never a silent pass.
+  # Caller lint — configuration pre-flight before anything expensive runs.
+  # Validates the consumer's caller against the published contract, then (when
+  # require_hardened_bases) checks that at least one hardened-registry pull
+  # secret pair is present. No docker login here — builds still authenticate.
+  # Fail closed: bad caller or missing required registry secrets never scan.
   # --------------------------------------------------------------------------
   caller-lint:
     name: Caller Lint
@@ -260,13 +261,56 @@ jobs:
             --contract .ci-scans-lint/contract/security-gate.schema.json \
             --consumer-root "$GITHUB_WORKSPACE"
 
+      # Presence-only check: at least one complete registry pair (token AND
+      # username). Secrets stay in the env block (Actions auto-redacts
+      # ${{ secrets.* }} in logs). Never echo/printenv/declare values; never
+      # enable xtrace (-x); error text names secret *keys* only.
+      - name: Check hardened-registry secrets present
+        if: inputs.require_hardened_bases == true || inputs.require_hardened_bases == 'true'
+        env:
+          CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+          CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+          IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+          IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
+        run: |
+          # Intentionally no -x: xtrace would print expansions containing secrets.
+          set -euo pipefail
+          set +x
+
+          # Boolean presence only — do not interpolate secret values into stdout.
+          cgr_tok=0; cgr_user=0; ib_tok=0; ib_user=0
+          [ -n "${CGR_PULL_TOKEN:-}" ] && cgr_tok=1
+          [ -n "${CGR_PULL_USERNAME:-}" ] && cgr_user=1
+          [ -n "${IRONBANK_TOKEN:-}" ] && ib_tok=1
+          [ -n "${IRONBANK_USERNAME:-}" ] && ib_user=1
+
+          if [ "$cgr_tok" != "$cgr_user" ]; then
+            echo "::error::Incomplete Chainguard credentials — both CGR_PULL_TOKEN and CGR_PULL_USERNAME are required for docker login."
+            exit 1
+          fi
+          if [ "$ib_tok" != "$ib_user" ]; then
+            echo "::error::Incomplete Iron Bank credentials — both IRONBANK_TOKEN and IRONBANK_USERNAME are required for docker login."
+            exit 1
+          fi
+          if [ "$cgr_tok" = 0 ] && [ "$ib_tok" = 0 ]; then
+            echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
+            exit 1
+          fi
+          echo "Hardened-registry credentials present (preflight)"
+
   # --------------------------------------------------------------------------
   # Phase 1 — build the backend image once and push an ephemeral scan tag
   # --------------------------------------------------------------------------
   phase1-build:
     name: Phase 1 — Docker image build
     runs-on: ubuntu-latest
-    needs: [caller-lint]
+    needs: [caller-lint, helm-check]
+    # When image_only, helm-check is skipped — still build after caller-lint.
+    # When helm/PSS fails, do not start expensive docker builds.
+    if: |
+      always() &&
+      needs.caller-lint.result == 'success' &&
+      (inputs.image_only == true || needs.helm-check.result == 'success')
     outputs:
       image: ${{ env.SCAN_IMAGE }}
     steps:
@@ -1051,8 +1095,14 @@ jobs:
   build-extra:
     name: Phase 1 extra — ${{ matrix.container.name }} image build
     runs-on: ubuntu-latest
-    needs: [caller-lint]
-    if: inputs.extra_containers != '' && inputs.extra_containers != '[]'
+    needs: [caller-lint, helm-check]
+    # Same fail-fast as phase1-build: no extra image builds after helm/PSS fail.
+    if: |
+      always() &&
+      needs.caller-lint.result == 'success' &&
+      (inputs.image_only == true || needs.helm-check.result == 'success') &&
+      inputs.extra_containers != '' &&
+      inputs.extra_containers != '[]'
     strategy:
       fail-fast: false
       matrix:

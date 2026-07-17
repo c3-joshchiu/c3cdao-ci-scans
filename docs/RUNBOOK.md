@@ -171,7 +171,7 @@ needs:
 `caller-lint` is a fail-closed configuration pre-flight: it resolves your caller
 and lints it against the published contract before anything scans. When
 `require_hardened_bases` is true (default), it also fails closed if neither
-Chainguard (`CGR_PULL_*`) nor Iron Bank (`IRONBANK_*`) pull tokens are present,
+Chainguard (`CGR_PULL_*`) nor Iron Bank (`IRONBANK_*`) complete pull credential pairs are present,
 so docker/kind never start on a missing-credentials run. Rule ids:
 `no-secrets-inherit`, `no-caller-concurrency`, `unknown-input`, `type-mismatch`,
 `missing-secret-map`, `image-values-mismatch`, `unreadable-caller`, plus the

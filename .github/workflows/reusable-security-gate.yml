@@ -261,9 +261,9 @@ jobs:
             --contract .ci-scans-lint/contract/security-gate.schema.json \
             --consumer-root "$GITHUB_WORKSPACE"
 
-      # Presence-only check matching phase1-build / build-extra "either registry"
-      # rule (token non-empty). Runs here so docker/kind never start when
-      # require_hardened_bases is on and no pull credentials were mapped.
+      # Presence-only check: at least one complete registry pair (token AND
+      # username). Token-only would pass here then fail at docker login in
+      # build jobs after they already started — defeating fail-fast.
       - name: Check hardened-registry secrets present
         if: inputs.require_hardened_bases == true || inputs.require_hardened_bases == 'true'
         env:
@@ -275,21 +275,21 @@ jobs:
           set -euo pipefail
           cgr_ok=0
           ib_ok=0
-          if [ -n "${CGR_PULL_TOKEN:-}" ]; then
+          if [ -n "${CGR_PULL_TOKEN:-}" ] && [ -n "${CGR_PULL_USERNAME:-}" ]; then
             cgr_ok=1
+          elif [ -n "${CGR_PULL_TOKEN:-}" ] || [ -n "${CGR_PULL_USERNAME:-}" ]; then
+            echo "::error::Incomplete Chainguard credentials — both CGR_PULL_TOKEN and CGR_PULL_USERNAME are required for docker login."
+            exit 1
           fi
-          if [ -n "${IRONBANK_TOKEN:-}" ]; then
+          if [ -n "${IRONBANK_TOKEN:-}" ] && [ -n "${IRONBANK_USERNAME:-}" ]; then
             ib_ok=1
+          elif [ -n "${IRONBANK_TOKEN:-}" ] || [ -n "${IRONBANK_USERNAME:-}" ]; then
+            echo "::error::Incomplete Iron Bank credentials — both IRONBANK_TOKEN and IRONBANK_USERNAME are required for docker login."
+            exit 1
           fi
           if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 0 ]; then
             echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
             exit 1
-          fi
-          if [ "$cgr_ok" = 1 ] && [ -z "${CGR_PULL_USERNAME:-}" ]; then
-            echo "::warning::CGR_PULL_TOKEN is set but CGR_PULL_USERNAME is empty — docker login may fail in build jobs."
-          fi
-          if [ "$ib_ok" = 1 ] && [ -z "${IRONBANK_USERNAME:-}" ]; then
-            echo "::warning::IRONBANK_TOKEN is set but IRONBANK_USERNAME is empty — docker login may fail in build jobs."
           fi
           echo "Hardened-registry credentials present (preflight)"
 

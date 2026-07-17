@@ -18,7 +18,8 @@ Rule ids: no-secrets-inherit, no-caller-concurrency, unknown-input,
 type-mismatch, missing-secret-map, image-values-mismatch, unreadable-caller,
 extra-containers-json, extra-containers-name, extra-containers-duplicate,
 extra-containers-dockerfile, extra-containers-template-path,
-extra-containers-target, extra-containers-build-arg.
+extra-containers-target, extra-containers-build-arg, smoke-secrets-json,
+smoke-secrets-name, smoke-secrets-duplicate, smoke-secrets-literals.
 An unreadable caller (missing/unparseable file, or no job whose ``uses:``
 matches the reusable gate workflow) fails closed.
 """
@@ -299,6 +300,93 @@ def check_extra_containers(with_map: dict[str, Any]) -> list[str]:
     return violations
 
 
+_SMOKE_SECRET_ALLOWED_KEYS = {"name", "literals"}
+_SMOKE_SECRET_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+_SMOKE_LITERAL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def check_smoke_secrets(with_map: dict[str, Any]) -> list[str]:
+    """Validate the caller's smoke_secrets value (a JSON-array string).
+
+    cluster-smoke creates each entry as a Kubernetes Secret before helm install.
+    literals is a newline-joined KEY=VALUE string (same shape as build_args).
+    Absent / empty / [] = no rules.
+    """
+    if "smoke_secrets" not in with_map:
+        return []
+    raw = with_map["smoke_secrets"]
+    if is_expression(raw):
+        return [
+            "smoke-secrets-json: smoke_secrets must be a literal JSON-array "
+            "string (expressions are not lintable; expand to a static JSON array "
+            "or use a multiline '|' block)"
+        ]
+    if not isinstance(raw, str):
+        return [
+            "smoke-secrets-json: smoke_secrets must be a JSON-array string, "
+            f"got {yaml_json_type(raw)}"
+        ]
+    text_val = raw.strip()
+    if text_val in ("", "[]"):
+        return []
+    try:
+        entries = json.loads(text_val)
+    except json.JSONDecodeError as e:
+        return [f"smoke-secrets-json: smoke_secrets is not valid JSON: {e}"]
+    if not isinstance(entries, list):
+        return [
+            "smoke-secrets-json: smoke_secrets must be a JSON array, "
+            f"got {yaml_json_type(entries)}"
+        ]
+    if entries and "\n" not in text_val:
+        notice(
+            "style",
+            "smoke-secrets-format",
+            "prefer a multiline YAML '|' block (one object per entry); "
+            "single-line quoted JSON does not scale — see docs/INPUTS.md",
+        )
+
+    violations: list[str] = []
+    seen: set[str] = set()
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            violations.append(f"smoke-secrets-json: entry {idx} is not an object")
+            continue
+        name = entry.get("name")
+        where = f"'{name}'" if isinstance(name, str) and name else f"entry {idx}"
+
+        unknown = set(entry) - _SMOKE_SECRET_ALLOWED_KEYS
+        if unknown:
+            violations.append(
+                f"smoke-secrets-json: {where}: unknown key(s) {sorted(unknown)}"
+            )
+
+        if not isinstance(name, str) or not _SMOKE_SECRET_NAME_RE.match(name):
+            violations.append(
+                f"smoke-secrets-name: {where}: name must match "
+                r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+            )
+        elif name in seen:
+            violations.append(f"smoke-secrets-duplicate: duplicate name '{name}'")
+        else:
+            seen.add(name)
+
+        literals = entry.get("literals")
+        if not isinstance(literals, str) or not literals.strip():
+            violations.append(
+                f"smoke-secrets-literals: {where}: 'literals' is required "
+                "(newline-joined KEY=VALUE string)"
+            )
+            continue
+        for line in literals.splitlines():
+            if line.strip() and not _SMOKE_LITERAL_RE.match(line):
+                violations.append(
+                    f"smoke-secrets-literals: {where}: literals line "
+                    f"'{line}' must match ^[A-Za-z_][A-Za-z0-9_]*="
+                )
+    return violations
+
+
 def lint(
     caller_path: Path, props: dict[str, Any], consumer_root: Path | None
 ) -> list[str]:
@@ -363,6 +451,7 @@ def lint(
                 )
 
     violations.extend(check_extra_containers(with_map))
+    violations.extend(check_smoke_secrets(with_map))
     violations.extend(check_image_values(with_map, props, consumer_root))
     return violations
 

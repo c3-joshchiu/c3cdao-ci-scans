@@ -143,7 +143,7 @@ on:
         type: string
         default: "8000"
       health_path:
-        description: "HTTP path the cluster-smoke step probes on the booted primary image (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Primary deployable only — extra_containers get no cluster smoke."
+        description: "HTTP path the cluster-smoke step probes on the booted primary workload (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Probes the primary only; built extra_containers images are kind-loaded so multi-image charts can install, but extras are not health-probed."
         type: string
         default: /health
       service_port:
@@ -155,7 +155,11 @@ on:
         type: string
         default: backend
       extra_containers:
-        description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), target (optional stage name), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra."
+        description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local; must match values-local tags the chart schedules with pullPolicy Never), target (optional stage name), build_args (newline-joined KEY=VALUE string). When set, cluster-smoke waits for build-extra and kind-loads each built tag before helm install. Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra."
+        type: string
+        default: ""
+      smoke_secrets:
+        description: "JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install — one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string, same shape as extra_containers.build_args). Use for chart envFrom/secretKeyRef pre-reqs (e.g. DATABASE_URL). Values are CI fixtures only — never commit real credentials. Default \"\" creates none beyond the built-in app-database-url Postgres helper. Prefer a multiline YAML '|' block."
         type: string
         default: ""
       image_only:
@@ -814,8 +818,13 @@ jobs:
   cluster-smoke:
     name: Cluster Smoke (kind + helm + /health)
     runs-on: ubuntu-latest
-    needs: [phase1-build]
-    if: ${{ inputs.image_only != true && needs.phase1-build.result == 'success' }}
+    # build-extra is skipped when extra_containers is empty; still allow smoke.
+    needs: [phase1-build, build-extra]
+    if: |
+      always() &&
+      inputs.image_only != true &&
+      needs.phase1-build.result == 'success' &&
+      (needs.build-extra.result == 'success' || needs.build-extra.result == 'skipped')
     outputs:
       smoke_ok: ${{ steps.smoke_outcome.outputs.ok }}
     env:
@@ -841,6 +850,15 @@ jobs:
       - name: Load image into local daemon
         run: docker load -i image.tar
 
+      # Extra images are artifact-named scan-image-<name>; pattern excludes the
+      # primary scan-image artifact. Each artifact lands in its own subdirectory.
+      - name: Download extra image artifacts
+        if: needs.build-extra.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          pattern: scan-image-*
+          path: extra-images
+
       - name: Create kind cluster
         uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
         with:
@@ -865,11 +883,56 @@ jobs:
           HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
           HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
           HELM_VALUES_LOCAL_FILE: ${{ inputs.helm_values_local_file }}
+          EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
+          SMOKE_SECRETS: ${{ inputs.smoke_secrets }}
+          BUILD_EXTRA_RESULT: ${{ needs.build-extra.result }}
         run: |
           set -uo pipefail
           fail() { echo "::warning::cluster-smoke: $1"; exit 1; }
 
           kind load docker-image "${IMAGE}" --name "${CLUSTER}" || fail "kind load failed"
+
+          # Kind-load every built extra_containers image so charts that schedule
+          # them with pullPolicy: Never do not hit ErrImageNeverPull. Fail closed
+          # when build-extra succeeded but an artifact/tag is missing.
+          if [ "${BUILD_EXTRA_RESULT}" = "success" ]; then
+            python3 - <<'PY' || fail "kind load of extra_containers failed"
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          raw = (os.environ.get("EXTRA_CONTAINERS") or "").strip()
+          if not raw or raw == "[]":
+              sys.exit(0)
+          try:
+              entries = json.loads(raw)
+          except json.JSONDecodeError as e:
+              print(f"invalid extra_containers JSON: {e}", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(entries, list):
+              print("extra_containers must be a JSON array", file=sys.stderr)
+              sys.exit(1)
+          cluster = os.environ["CLUSTER"]
+          for idx, entry in enumerate(entries):
+              if not isinstance(entry, dict):
+                  print(f"extra_containers entry {idx} is not an object", file=sys.stderr)
+                  sys.exit(1)
+              name = entry.get("name")
+              if not isinstance(name, str) or not name:
+                  print(f"extra_containers entry {idx} missing name", file=sys.stderr)
+                  sys.exit(1)
+              tag = entry.get("image") or f"{name}:local"
+              tar = Path("extra-images") / f"scan-image-{name}" / "image.tar"
+              if not tar.is_file():
+                  print(f"missing artifact for extra '{name}' at {tar}", file=sys.stderr)
+                  sys.exit(1)
+              subprocess.check_call(["docker", "load", "-i", str(tar)])
+              subprocess.check_call(
+                  ["kind", "load", "docker-image", tag, "--name", cluster]
+              )
+              print(f"kind-loaded extra image {tag}")
+          PY
+          fi
+
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
           # Ephemeral Postgres (chart does not provision a DB).
@@ -904,10 +967,56 @@ jobs:
 
           kubectl -n "${NAMESPACE}" rollout status deploy/app-postgres --timeout=120s || fail "postgres not ready"
 
-          # DATABASE_URL secret the chart expects (values-local: app-database-url).
+          # Default DATABASE_URL helper for charts that expect app-database-url.
+          # Callers whose secret name differs (e.g. aca-database-url) pass smoke_secrets.
           kubectl -n "${NAMESPACE}" create secret generic app-database-url \
             --from-literal=DATABASE_URL="postgresql://postgres:postgres@app-postgres:5432/appdb" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+          # Optional caller-declared Secrets (CI fixture literals only).
+          python3 - <<'PY' || fail "smoke_secrets create failed"
+          import json, os, subprocess, sys
+
+          raw = (os.environ.get("SMOKE_SECRETS") or "").strip()
+          if not raw or raw == "[]":
+              sys.exit(0)
+          try:
+              entries = json.loads(raw)
+          except json.JSONDecodeError as e:
+              print(f"invalid smoke_secrets JSON: {e}", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(entries, list):
+              print("smoke_secrets must be a JSON array", file=sys.stderr)
+              sys.exit(1)
+          ns = os.environ["NAMESPACE"]
+          for idx, entry in enumerate(entries):
+              if not isinstance(entry, dict):
+                  print(f"smoke_secrets entry {idx} is not an object", file=sys.stderr)
+                  sys.exit(1)
+              name = entry.get("name")
+              literals = entry.get("literals")
+              if not isinstance(name, str) or not name:
+                  print(f"smoke_secrets entry {idx} missing name", file=sys.stderr)
+                  sys.exit(1)
+              if not isinstance(literals, str) or not literals.strip():
+                  print(f"smoke_secrets '{name}': literals must be a non-empty KEY=VALUE string", file=sys.stderr)
+                  sys.exit(1)
+              cmd = [
+                  "kubectl", "-n", ns, "create", "secret", "generic", name,
+                  "--dry-run=client", "-o", "yaml",
+              ]
+              for line in literals.splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
+                  if "=" not in line:
+                      print(f"smoke_secrets '{name}': bad literals line '{line}'", file=sys.stderr)
+                      sys.exit(1)
+                  cmd.append(f"--from-literal={line}")
+              rendered = subprocess.check_output(cmd)
+              subprocess.run(["kubectl", "apply", "-f", "-"], input=rendered, check=True)
+              print(f"created smoke secret {name}")
+          PY
 
           # The chart renders an HTTPRoute (Gateway API). kind ships no Gateway
           # API CRDs, so install them (server-side: these CRDs exceed the
@@ -921,9 +1030,9 @@ jobs:
 
           # Install the app. The post-install migration hook runs alembic against
           # the Postgres above (from the backend image, pullPolicy Never — hence
-          # SCAN_IMAGE must equal values-local's scan_image). Frontend
-          # image isn't built here, so don't --wait on the whole release; we gate
-          # on the backend rollout explicitly.
+          # SCAN_IMAGE must equal values-local's scan_image). Extra images are
+          # kind-loaded above when build-extra ran; don't --wait on the whole
+          # release — gate on the backend rollout / health probe explicitly.
           helm install "${HELM_RELEASE_NAME}" "./${HELM_CHART_PATH}" \
             -n "${NAMESPACE}" \
             -f "${HELM_VALUES_FILE}" \
@@ -1090,7 +1199,8 @@ jobs:
   # unaffected. Mirrors phase1-build (build + image SBOM + save/upload) with
   # per-leg artifact names and buildx cache scopes so parallel legs never
   # collide. context/image self-default in-expression (no renderer fills them).
-  # No helm/cluster-smoke contract — extras are image-scan targets only.
+  # cluster-smoke kind-loads these artifacts when the job succeeds; image tags
+  # must match values-local for charts that schedule extras with pullPolicy Never.
   # --------------------------------------------------------------------------
   build-extra:
     name: Phase 1 extra — ${{ matrix.container.name }} image build

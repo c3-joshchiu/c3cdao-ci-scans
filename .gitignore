@@ -23,9 +23,13 @@
 /.skills/
 /.gemini/
 /.orchestra/
+/.reviews/
 /.tickets/
 /.env
 /.env.*
+
+# stray local scratch
+err.txt
 
 # Linked git worktrees for parallel agent sessions (see AGENTS.md)
 .worktrees/

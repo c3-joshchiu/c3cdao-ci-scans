@@ -125,16 +125,24 @@ uv run scripts/lib/lint_caller.py <caller.yml> \
 ## 7. Pilot on a scratch branch, then promote to trunk
 
 To pilot on a shared repo without touching its real trunk, cut a scratch branch
-and scope both the trigger and the ruleset to it. **Name the scratch branch
-`ci-scans-<usecasename>`** (the canonical convention across the c3cdao usecase
-repos — e.g. the DSA pilot uses `ci-scans-ecpilot`). Use a bare `ci-scans` or a
-slash form like `ci-scans/...` is non-conforming; keep the single hyphenated
-`ci-scans-<usecasename>` branch as the canonical scan target.
+and scope both the trigger and the ruleset to it. **Branch naming depends on the
+repo shape:**
 
-- caller: `on.pull_request.branches: [ci-scans-<usecasename>]`
-- ops YAML: `target.trunk_branches: [ci-scans-<usecasename>]` and
-  `ruleset.target_branch: ci-scans-<usecasename>` (the ruleset then targets that
-  literal ref, independent of the repo's default branch)
+- **Single-app usecase repo** (one app per repo, e.g. `c3cdao-dsa-ecpilot`): use
+  the **bare** name **`ci-scans`**. There is only one usecase in the repo, so no
+  token is needed. The helm-chart side mirrors this with a bare **`ci-chart`**.
+- **Shared umbrella repo** (many usecases integrated in one repo, i.e.
+  `c3cdao-apps`): a token is required to avoid collisions — use
+  **`ci-chart-<usecasename>`** (e.g. `ci-chart-ecpilot`) so each usecase's chart
+  branch coexists.
+
+Keep a single hyphenated branch as the scan target; a slash form like
+`ci-scans/...` is non-conforming.
+
+- caller: `on.pull_request.branches: [ci-scans]` (single-app repo)
+- ops YAML: `target.trunk_branches: [ci-scans]` and `ruleset.target_branch:
+  ci-scans` (the ruleset then targets that literal ref, independent of the repo's
+  default branch)
 
 Full scratch-branch walkthrough:
 [CI CD Workflow runbook](https://c3energy.atlassian.net/wiki/spaces/CCA/pages/10910040079/).

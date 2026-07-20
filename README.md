@@ -43,9 +43,10 @@ Field reference for every `with:` value: [docs/INPUTS.md](docs/INPUTS.md).
    ./scripts/setup-ruleset.sh --config configs/local/<repo>.yaml --enable  # enforce
    ```
 6. **Open a PR.** The `security-scan / Security Gate` context appears and goes green.
-   Pilot on a scratch branch named **`ci-scans-<usecasename>`** first (the canonical
-   per-usecase convention — e.g. `ci-scans-ecpilot`), then promote to trunk
-   ([docs/RUNBOOK.md](docs/RUNBOOK.md)).
+   Pilot on a scratch branch first — **`ci-scans`** in a single-app usecase repo (no
+   token needed), then promote to trunk ([docs/RUNBOOK.md](docs/RUNBOOK.md)). The
+   shared umbrella `c3cdao-apps` is the exception: it tokens its chart branches as
+   `ci-chart-<usecasename>` to keep multiple usecases from colliding.
 
 ## Caller lint
 

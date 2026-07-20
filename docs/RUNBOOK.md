@@ -125,12 +125,16 @@ uv run scripts/lib/lint_caller.py <caller.yml> \
 ## 7. Pilot on a scratch branch, then promote to trunk
 
 To pilot on a shared repo without touching its real trunk, cut a scratch branch
-and scope both the trigger and the ruleset to it:
+and scope both the trigger and the ruleset to it. **Name the scratch branch
+`ci-scans-<usecasename>`** (the canonical convention across the c3cdao usecase
+repos — e.g. the DSA pilot uses `ci-scans-ecpilot`). Use a bare `ci-scans` or a
+slash form like `ci-scans/...` is non-conforming; keep the single hyphenated
+`ci-scans-<usecasename>` branch as the canonical scan target.
 
-- caller: `on.pull_request.branches: [<scratch>]`
-- ops YAML: `target.trunk_branches: [<scratch>]` and
-  `ruleset.target_branch: <scratch>` (the ruleset then targets that literal ref,
-  independent of the repo's default branch)
+- caller: `on.pull_request.branches: [ci-scans-<usecasename>]`
+- ops YAML: `target.trunk_branches: [ci-scans-<usecasename>]` and
+  `ruleset.target_branch: ci-scans-<usecasename>` (the ruleset then targets that
+  literal ref, independent of the repo's default branch)
 
 Full scratch-branch walkthrough:
 [CI CD Workflow runbook](https://c3energy.atlassian.net/wiki/spaces/CCA/pages/10910040079/).

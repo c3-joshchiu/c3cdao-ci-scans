@@ -150,6 +150,23 @@ Keep a single hyphenated branch as the scan target; a slash form like
 Full scratch-branch walkthrough:
 [CI CD Workflow runbook](https://c3energy.atlassian.net/wiki/spaces/CCA/pages/10910040079/).
 
+**Triggering the gate (canary PR).** The scan target branch never receives
+direct pushes to trigger the gate — open a trigger-only PR into it from the
+canonical canary branch **`ci-scans-canary`**:
+
+1. Cut `ci-scans-canary` off the `ci-scans` head and add a trivial marker
+   commit (e.g. a `.ci-scans-canary` file).
+2. Open a PR `ci-scans-canary` → `ci-scans` titled
+   `canary: security-gate @<tag>`. The `on.pull_request.branches: [ci-scans]`
+   trigger fires the gate; existing rules on the repo's real trunk are never
+   touched.
+3. The canary PR is **never merged** — it exists only to trigger. Re-trigger a
+   fresh run after a caller change by merging the updated `ci-scans` head into
+   `ci-scans-canary` (`gh api -X POST repos/<owner>/<repo>/merges -f
+   base=ci-scans-canary -f head=ci-scans`).
+4. Comment the per-job results table and run URL on the canary PR as evidence
+   (see `c3-e/c3cdao-ppubs#33` for the reference shape).
+
 When the pilot is green, **promote** it to the repo's default branch:
 
 1. In the caller, point the trigger branches at the trunk

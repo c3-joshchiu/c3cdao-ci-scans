@@ -14,8 +14,11 @@ Inputs table in the [README](../README.md).
 The gate assumes this app shape:
 
 - the app serves `GET /health` (cluster-smoke probes it after the helm install)
-- a single-image helm deploy — one backend image built, scanned, kind-loaded,
-  and installed (add `extra_containers` for self-authored, gate-reachable frontend/sidecar images)
+- a helm deploy of the primary backend image (built, scanned, kind-loaded, and
+  installed). Add `extra_containers` for self-authored, gate-reachable
+  frontend/sidecar images — those tags are also kind-loaded for smoke when
+  built. Pass `smoke_secrets` when the chart requires Secrets beyond the
+  default `app-database-url` helper
 - an ASGI backend describable by the `app_*` inputs (`app_path`, `app_package`,
   `app_module`, `app_port`)
 
@@ -190,9 +193,12 @@ so docker/kind never start on a missing-credentials run. Rule ids:
 `extra_containers` entry validators `extra-containers-json`,
 `extra-containers-name`, `extra-containers-duplicate`,
 `extra-containers-dockerfile`, `extra-containers-template-path`,
-`extra-containers-target`, `extra-containers-build-arg`. A non-failing style notice
-`extra-containers-format` fires when the array is packed onto one quoted line —
-prefer a multiline YAML `|` block (see [INPUTS.md](INPUTS.md)). Rules skipped
+`extra-containers-target`, `extra-containers-build-arg`, plus the
+`smoke_secrets` validators `smoke-secrets-json`, `smoke-secrets-name`,
+`smoke-secrets-duplicate`, `smoke-secrets-literals`. Non-failing style notices
+`extra-containers-format` / `smoke-secrets-format` fire when an array is packed
+onto one quoted line — prefer a multiline YAML `|` block (see
+[INPUTS.md](INPUTS.md)). Rules skipped
 for a stated reason announce on stderr (`notice: skip: image-values-mismatch:
 --consumer-root not given`); with a consumer checkout supplied, the values-file
 rule announces `notice: active: image-values-mismatch: checked <path>`. The
@@ -214,12 +220,25 @@ Gate jobs are ordered so cheap failures stop expensive work from starting:
 1. **`caller-lint`** — caller contract + (when `require_hardened_bases`) hardened-registry secret presence.
 2. **`helm-check`** (unless `image_only`) — helm lint/template + restricted PSS — in parallel with SAST/secrets-scan.
 3. **`phase1-build` / `build-extra`** — docker image builds — **need** successful `caller-lint` and, when helm runs, successful `helm-check`. A PSS failure does not start multi-minute image builds.
-4. **`cluster-smoke` / `vuln-scan`** — need a successful primary image build (unchanged).
+4. **`cluster-smoke` / `vuln-scan`** — need a successful primary image build;
+   cluster-smoke also needs `build-extra` when `extra_containers` is set (skipped
+   extras leave smoke free to run after phase1 alone).
 
 This is DAG `needs:` wiring, not in-job cancellation. Prior runs on the same ref are still cancelled by workflow `concurrency:`.
 
 **Fleet testing:** canary **one** consumer through a pin/secrets change before fanning out many repos. Do not re-trigger a full multi-repo Security Scan matrix until the canary's real fail mode is fixed.
 
+
+## Consumer onboarding blockers (checklist)
+
+Gate product gaps for full-cluster smoke are tracked as [#23](https://github.com/c3-joshchiu/c3cdao-ci-scans/issues/23)
+(extra_containers kind-load) and [#24](https://github.com/c3-joshchiu/c3cdao-ci-scans/issues/24)
+(smoke Secrets contract). **Consumer-owned** readiness gaps that repeatedly turn
+Security Scan red — restricted PSS on charts, hardened-base Dockerfiles, registry
+pull-secret pairs, and the canary-before-fleet process — live in
+[#27](https://github.com/c3-joshchiu/c3cdao-ci-scans/issues/27). Point adoption
+PRs there instead of inventing per-repo mystery reds; do not fan out an 8-repo
+Security Scan matrix until one canary's real fail mode is fixed.
 
 ## Hardened-base registry login (phase1-build + build-extra)
 

@@ -30,7 +30,11 @@ jobs:
 
 Build and image-scan a worker or sidecar alongside the primary deployable.
 `extra_containers` is a JSON array passed as a string; one object per extra
-image. Only the primary deployable gets a cluster smoke test.
+image. Cluster-smoke **kind-loads** each built extra tag before helm install
+(so charts that schedule them with `pullPolicy: Never` do not hit
+`ErrImageNeverPull`). Set each entry's `image` to match the chart's
+values-local tag. The HTTP health probe still targets the primary workload
+only.
 
 Point `extra_containers` at **self-authored, gate-reachable** images (your
 frontend/worker/sidecar Dockerfiles whose bases pull from `cgr.dev` and/or
@@ -64,6 +68,34 @@ jobs:
             "dockerfile": "apps/frontend/Dockerfile",
             "context": "apps/frontend",
             "image": "frontend:local"
+          }
+        ]
+    secrets: inherit
+```
+
+### Smoke Secrets (`smoke_secrets`)
+
+Charts that reference Kubernetes Secrets via `envFrom` / `secretKeyRef` need
+those objects present before `helm install`. Pass CI fixture literals (never
+real credentials) as a JSON array — same multiline `|` style as
+`extra_containers`. Each object has `name` (Secret metadata.name) and
+`literals` (newline-joined `KEY=VALUE`, same shape as `build_args`).
+
+Cluster-smoke still creates a default `app-database-url` Postgres helper; use
+`smoke_secrets` when your chart expects a different name or additional keys.
+
+```yaml
+jobs:
+  security-scan:
+    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.1.0
+    with:
+      scan_image: app:local
+      dockerfile: containers/backend/Dockerfile
+      smoke_secrets: |
+        [
+          {
+            "name": "aca-database-url",
+            "literals": "DATABASE_URL=postgresql://postgres:postgres@app-postgres:5432/appdb"
           }
         ]
     secrets: inherit
@@ -128,9 +160,10 @@ production image is clean; the job labels that run as a **proxy scan**.
 | `app_package` | string | `app-backend` | Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata. |
 | `app_module` | string | `app.main:app` | ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object. |
 | `app_port` | string | `8000` | Container port the backend listens on, passed as the Dockerfile's APP_PORT build ARG; must match the consumer chart's backend service/probe port. |
-| `health_path` | string | `/health` | HTTP path the cluster-smoke step probes on the booted primary image (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Primary deployable only — extra_containers get no cluster smoke. |
+| `health_path` | string | `/health` | HTTP path the cluster-smoke step probes on the booted primary workload (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Probes the primary only; built extra_containers images are kind-loaded so multi-image charts can install, but extras are not health-probed. |
 | `service_port` | string | `8000` | Port the primary backend Kubernetes Service exposes — used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior). |
 | `smoke_workload_match` | string | `backend` | Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts). |
-| `extra_containers` | string | `""` | JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local), target (optional stage name), build_args (newline-joined KEY=VALUE string). Prefer a multiline YAML '\|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default "" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra. |
+| `extra_containers` | string | `""` | JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local; must match values-local tags the chart schedules with pullPolicy Never), target (optional stage name), build_args (newline-joined KEY=VALUE string). When set, cluster-smoke waits for build-extra and kind-loads each built tag before helm install. Prefer a multiline YAML '\|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default "" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra. |
+| `smoke_secrets` | string | `""` | JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install — one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string, same shape as extra_containers.build_args). Use for chart envFrom/secretKeyRef pre-reqs (e.g. DATABASE_URL). Values are CI fixtures only — never commit real credentials. Default "" creates none beyond the built-in app-database-url Postgres helper. Prefer a multiline YAML '\|' block. |
 | `image_only` | boolean | `false` | When true, skip helm-check and cluster-smoke (and omit them from the Security Gate blocking set) — for infra/image-only repos that build and vuln-scan images without a deployable app chart. Default false keeps app callers unchanged (helm + smoke still blocking). |
 <!-- END GENERATED: security-gate-inputs -->

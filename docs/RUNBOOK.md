@@ -101,7 +101,7 @@ without writing.
 
 The ops YAML is schema-validated at load (typos fail with pathed errors; see
 `config/schema.json`) and carries **operations-only** fields: `target`,
-`ci_scans`, `ruleset`, plus optional `workflows` and `secrets`. Gate values live
+`ci_scans`, `ruleset`, plus optional `workflows`. Gate values live
 in your caller's `with:`, not here — a leftover `security_gate:` block is
 deprecated and ignored with a warning.
 

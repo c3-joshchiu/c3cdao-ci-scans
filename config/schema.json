@@ -107,26 +107,6 @@
           ]
         }
       }
-    },
-    "secrets": {
-      "type": "object",
-      "properties": {
-        "env_files": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "Dotenv files searched for gate secrets, resolved relative to the ci-scans repo root; later files override earlier ones per key"
-        },
-        "names": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "pattern": "^[A-Z][A-Z0-9_]*$"
-          },
-          "description": "Secret names to push (defaults to the CGR_PULL_*/IRONBANK_* set)"
-        }
-      }
     }
   }
 }

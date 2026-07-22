@@ -139,6 +139,21 @@ repo shape:**
   **`ci-chart-<usecasename>`** (e.g. `ci-chart-ecpilot`) so each usecase's chart
   branch coexists.
 
+**Why scan the shared umbrella repo at all?** Each usecase repo already builds
+and scans its own images, so a gate run on `c3cdao-apps` is not primarily an
+image scan — image and SAST results there largely duplicate the source repos'
+runs. When onboarded, its purpose is a left-shifted final integration check on
+the composed umbrella chart before handoff to the SecondFront / Game Warden
+vendor pipeline: umbrella-level values overrides can silently regress a
+subchart's securityContext/PSS posture, co-installed subcharts can conflict at
+deploy time, and the umbrella repo's own files (prod values, env samples) need
+their own secrets scan that no subchart repo covers. In short: a deliberately
+redundant "scan of already-scanned subcharts" that catches integration-time
+regressions before the vendor pipeline does. (A secondary rationale — vendor
+scanning is billed per chart, so gating one umbrella chart is cheaper than N
+subcharts — is plausible but unconfirmed; verify with SecondFront before
+relying on it.)
+
 Keep a single hyphenated branch as the scan target; a slash form like
 `ci-scans/...` is non-conforming.
 
@@ -318,13 +333,20 @@ consumers can call it.
 
 ## Scripts
 
+Onboarding a consumer is **six one-time commands run from an operator laptop**:
+four `gh secret set` (§4), one `gh variable set SECURITY_SCAN_BLOCKING` (§8),
+and one `./scripts/setup-ruleset.sh`. None of this runs in CI, and none of it
+renders or rewrites the caller.
+
 | Script | Purpose |
 |--------|---------|
-| `setup-ruleset.sh` | create/update the `security-scan-gates` ruleset (disabled by default; `--enable` to enforce) |
+| `setup-ruleset.sh` | convenience wrapper around a single GitHub rulesets API call: create/update the `security-scan-gates` ruleset (created **disabled**; `--enable` to enforce; idempotent, so re-run it to re-target) |
 
-`scripts/lib/` holds the internals: config load/validate and the dotenv reader
-(PEP 723 Python run via `uv`), the contract extractor (`extract_contract.py`),
-and the caller linter (`lint_caller.py`, also run in-gate as `caller-lint`).
+`scripts/lib/` is mostly **not** operator tooling: `lint_caller.py`,
+`evaluate_security_gate.py`, and `assert_restricted_pss.py` run inside the gate
+(Layer 1); `extract_contract.py` is dev-time contract generation for this repo
+(the `contract-extract` hook); only the config loader supports
+`setup-ruleset.sh`.
 
 ## Migrating from modular scans
 

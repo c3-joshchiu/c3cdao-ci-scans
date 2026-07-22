@@ -23,9 +23,7 @@
 #                     (needs: phase1-build) — proves the image actually boots;
 #                     skipped when image_only
 #   vuln-scan         Trivy (image + source SBOM) + Grype (image + source SBOM
-#                     + image SBOM). No Trivy-on-image-SBOM: OS CVEs come from
-#                     the direct Trivy image scan; Trivy can't match OS pkgs
-#                     from a Syft SBOM. (needs: phase1-build)
+#                     + image SBOM). (needs: phase1-build)
 #   security-gate     aggregate pass/fail (needs: all, if: always())
 #
 # Build artifact handling (mirrors the modular workflows' "transient, runner-
@@ -1158,12 +1156,8 @@ jobs:
           exit-code: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' && '1' || '0' }}
           trivyignores: .trivyignore
 
-      # No "Trivy scan — image SBOM" step: OS-package CVEs are already covered
-      # authoritatively by "Trivy scan — image" above. Trivy cannot reliably
-      # match OS packages from a third-party (Syft) SBOM — it warns as much and
-      # returns 0 OS findings where the direct image scan finds them. Grype +
-      # Syft are the same vendor (Anchore), so the image SBOM round-trips
-      # cleanly to "Grype scan — image SBOM" below, which validates the artifact.
+      # Trivy is not run on the image SBOM (Syft-SBOM incompatibility); the
+      # direct Trivy image scan above covers those packages.
 
       - name: Grype scan — image
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0

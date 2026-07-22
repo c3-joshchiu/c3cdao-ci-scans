@@ -8,6 +8,10 @@ examples above the markers freely; the generator preserves them.
 
 ## Worked examples
 
+The examples pass the four gate secrets explicitly because `secrets: inherit`
+only works within the same org/enterprise (it silently passes nothing across
+owners) and caller-lint rejects it (`no-secrets-inherit`).
+
 ### Single-image default
 
 The common case: one backend image built from one Dockerfile. Omit anything you
@@ -23,7 +27,11 @@ jobs:
       app_path: apps/app/backend
       app_package: app-backend
       app_module: app.main:app
-    secrets: inherit
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
 ```
 
 ### Multi-container (`extra_containers`)
@@ -70,7 +78,11 @@ jobs:
             "image": "frontend:local"
           }
         ]
-    secrets: inherit
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
 ```
 
 ### Smoke Secrets (`smoke_secrets`)
@@ -98,7 +110,11 @@ jobs:
             "literals": "DATABASE_URL=postgresql://postgres:postgres@app-postgres:5432/appdb"
           }
         ]
-    secrets: inherit
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
 ```
 
 ### Non-8000 `service_port` / `health_path`
@@ -117,7 +133,11 @@ jobs:
       app_port: "9090"
       service_port: "80"
       health_path: /api/health
-    secrets: inherit
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
 ```
 
 ## Scan boundary

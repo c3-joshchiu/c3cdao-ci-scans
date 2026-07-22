@@ -19,7 +19,7 @@ Source of truth for the job list is
 | `sast-sonarqube` | SAST | SonarQube | source | warn-only (`continue-on-error`) | intentional ramp |
 | `helm-check` | Helm lint + restricted-PSS | helm + PSS assert | chart | blocking unless `image_only` | aligned |
 | `cluster-smoke` | kind deploy + health probe (+ kind-load extras, optional `smoke_secrets`) | kind + kubectl | chart+image | skipped when `image_only`; else advisory until `SECURITY_SCAN_BLOCKING=true` | intentional ramp |
-| `vuln-scan` | Image + SBOM vuln scan | Trivy (image+source SBOM) + Grype (image+source+image SBOM) | image + SBOM | advisory until `SECURITY_SCAN_BLOCKING=true` | aligned tooling; 1 documented exception (no Trivy-on-image-SBOM: Trivy can't match OS pkgs from a Syft SBOM) |
+| `vuln-scan` | Image + SBOM vuln scan | Trivy (image+source SBOM) + Grype (image+source+image SBOM) | image + SBOM | advisory until `SECURITY_SCAN_BLOCKING=true` | aligned (Trivy covers the SBOM requirement via the source SBOM; the image SBOM is scanned by Grype) |
 | `build-extra` | multi-container build (frontend+backend) | Docker matrix | extra images | blocking only when `extra_containers` set | closes spec's "frontend AND backend" |
 | `vuln-scan-extra` | multi-container image scan | Trivy/Grype | extra images | blocking only when `extra_containers` set | closes spec's "frontend AND backend" |
 | `security-gate` | aggregate required check | — | — | the one required check | aligned |
@@ -68,13 +68,3 @@ Two spec items are intentionally owned elsewhere:
   Private-mirror or entitlement-unreachable prod bases (and attestation that the
   *approved* image is clean) remain with the consumer IL5 / Game Warden pipeline.
   When `require_hardened_bases: false`, vuln-scan labels a **proxy scan**.
-
-### Single documented tool exception: no Trivy-on-image-SBOM
-
-`vuln-scan` runs Trivy on the image and the source SBOM, and Grype on the image,
-source SBOM, and image SBOM — but deliberately omits Trivy-on-image-SBOM. Trivy
-cannot reliably match OS packages from a third-party (Syft) SBOM; it returns
-zero OS findings where the direct Trivy image scan finds them. The direct image
-scan covers OS CVEs authoritatively, and Grype (same vendor as Syft) validates
-the image-SBOM artifact round-trip. This is the one documented coverage
-exception, not a miss.

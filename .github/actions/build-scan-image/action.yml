@@ -46,16 +46,30 @@ runs:
   using: composite
   steps:
     # The job checks out the callee (ci-scans) repo into .ci-scans to resolve
-    # this action. Remove it before building so the docker build context stays
-    # byte-identical to the pre-refactor workflow (consumer contexts default
-    # to '.', and a `COPY .` Dockerfile would otherwise embed .ci-scans and
-    # invalidate the GHA build cache). Safe: this composite is already loaded
-    # and every nested action here is remote (runner action cache, not the
-    # workspace). Do not add local `uses: ./.ci-scans/...` steps after this
-    # one within the same job.
-    - name: Prune .ci-scans from the build context
+    # this action; keep it OUT of the docker build context so the context
+    # stays byte-identical to the pre-refactor workflow (consumer contexts
+    # default to '.', and a `COPY .` Dockerfile would otherwise embed
+    # .ci-scans and invalidate the GHA build cache). Exclude it via a
+    # .dockerignore entry rather than deleting the directory: the runner
+    # resolves composite child steps from .ci-scans on disk as this action
+    # advances, so `rm -rf .ci-scans` mid-action kills every subsequent child
+    # step ("Can't find 'action.yml' ... under .ci-scans/..."). The consumer's
+    # own .dockerignore (if any) is backed up and restored after the build.
+    - name: Exclude .ci-scans from the build context (.dockerignore)
+      id: dockerignore
       shell: bash
-      run: rm -rf .ci-scans
+      env:
+        CONTEXT: ${{ inputs.context }}
+      run: |
+        set -euo pipefail
+        di="${CONTEXT%/}/.dockerignore"
+        existed=false
+        if [ -f "$di" ]; then
+          existed=true
+          cp "$di" "$RUNNER_TEMP/dockerignore.orig"
+        fi
+        printf '\n.ci-scans/\n' >> "$di"
+        echo "existed=$existed" >> "$GITHUB_OUTPUT"
 
     - name: Build scan image (local load, no push)
       uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
@@ -71,6 +85,25 @@ runs:
         cache-from: type=gha,scope=${{ inputs.cache-scope }}
         cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
         provenance: false
+
+    # Always restore the consumer's .dockerignore (or remove the one we
+    # created) so later steps and any consumer tooling see the original tree.
+    - name: Restore original .dockerignore
+      if: always()
+      shell: bash
+      env:
+        CONTEXT: ${{ inputs.context }}
+        EXISTED: ${{ steps.dockerignore.outputs.existed }}
+      run: |
+        set -euo pipefail
+        di="${CONTEXT%/}/.dockerignore"
+        # Key on the backup file, not just the recorded output, so a partial
+        # failure in the exclude step can never delete a consumer's original.
+        if [ -f "$RUNNER_TEMP/dockerignore.orig" ]; then
+          mv "$RUNNER_TEMP/dockerignore.orig" "$di"
+        elif [ "$EXISTED" != "true" ]; then
+          rm -f "$di"
+        fi
 
     # Generate image SBOM while the image is in the local Docker daemon.
     # Syft uses its own registry client, so scanning the local daemon image

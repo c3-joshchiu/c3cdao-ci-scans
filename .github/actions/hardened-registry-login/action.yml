@@ -1,0 +1,126 @@
+# Hardened-base login: authenticate to Chainguard (cgr.dev) when CGR_PULL_*
+# is set AND to Iron Bank (registry1.dso.mil) when IRONBANK_* is set — both
+# sessions can be active at once, so a repo whose images span both registries
+# (e.g. a Chainguard primary with Iron Bank extra_containers) builds in a
+# single run. If only Iron Bank is configured, the primary's builder/runtime
+# optionally swap to the ironbank_* image inputs. With neither,
+# require_hardened_bases decides: fail (default) or warn and build on the
+# consumer-specified bases.
+#
+# FAILOVER SEMANTICS (must stay identical across every consumer job):
+# build-extra intentionally inherits the primary's failover behavior
+# bit-for-bit — extras legs resolve builder_image/runtime_image outputs with
+# the exact same CGR-absent/Iron-Bank-present swap as phase1-build, even
+# though extras carry their own base args via matrix build_args. Do not
+# specialize this action per job.
+name: Login to hardened base registries
+description: >-
+  Docker-login to Chainguard (cgr.dev) and/or Iron Bank when their credential
+  pairs are present (with retry), resolve the effective builder/runtime base
+  images (Iron Bank failover only when CGR is absent and Iron Bank present),
+  and fail or warn per require-hardened-bases when neither credential exists.
+  The primary-base failover behavior is shared verbatim by phase1-build and
+  build-extra (extras inherit the primary failover) — preserve bit-for-bit.
+inputs:
+  cgr-pull-token:
+    description: "Chainguard pull token (secrets.CGR_PULL_TOKEN); empty when unset."
+    required: false
+    default: ""
+  cgr-pull-username:
+    description: "Chainguard pull username (secrets.CGR_PULL_USERNAME); empty when unset."
+    required: false
+    default: ""
+  ironbank-token:
+    description: "Iron Bank token (secrets.IRONBANK_TOKEN); empty when unset."
+    required: false
+    default: ""
+  ironbank-username:
+    description: "Iron Bank username (secrets.IRONBANK_USERNAME); empty when unset."
+    required: false
+    default: ""
+  ironbank-registry:
+    description: "Iron Bank registry host (inputs.ironbank_registry)."
+    required: true
+  builder-image:
+    description: "Consumer-specified builder base image (inputs.builder_image)."
+    required: true
+  runtime-image:
+    description: "Consumer-specified runtime base image (inputs.runtime_image)."
+    required: true
+  ironbank-builder-image:
+    description: "Optional Iron Bank replacement builder image, applied only on primary-base failover (inputs.ironbank_builder_image)."
+    required: false
+    default: ""
+  ironbank-runtime-image:
+    description: "Optional Iron Bank replacement runtime image, applied only on primary-base failover (inputs.ironbank_runtime_image)."
+    required: false
+    default: ""
+  require-hardened-bases:
+    description: "Hardened-base policy (inputs.require_hardened_bases): 'true' fails when no credentials; 'false' warns and builds on consumer-specified bases."
+    required: true
+outputs:
+  builder_image:
+    description: "Effective builder base image after failover resolution."
+    value: ${{ steps.login.outputs.builder_image }}
+  runtime_image:
+    description: "Effective runtime base image after failover resolution."
+    value: ${{ steps.login.outputs.runtime_image }}
+runs:
+  using: composite
+  steps:
+    - name: Login and resolve base images
+      id: login
+      shell: bash
+      env:
+        CGR_PULL_TOKEN: ${{ inputs.cgr-pull-token }}
+        CGR_PULL_USERNAME: ${{ inputs.cgr-pull-username }}
+        IRONBANK_TOKEN: ${{ inputs.ironbank-token }}
+        IRONBANK_USERNAME: ${{ inputs.ironbank-username }}
+        IRONBANK_REGISTRY: ${{ inputs.ironbank-registry }}
+        BUILDER_IMAGE_IN: ${{ inputs.builder-image }}
+        RUNTIME_IMAGE_IN: ${{ inputs.runtime-image }}
+        IB_BUILDER_IMAGE: ${{ inputs.ironbank-builder-image }}
+        IB_RUNTIME_IMAGE: ${{ inputs.ironbank-runtime-image }}
+        REQUIRE_HARDENED_BASES: ${{ inputs.require-hardened-bases }}
+      run: |
+        set -uo pipefail
+        login_retry() { # <registry> <username> <token>
+          local attempt=1 delay=15
+          until printf '%s' "$3" | docker login "$1" -u "$2" --password-stdin; do
+            if [ "$attempt" -ge 4 ]; then echo "$1 login failed after 4 attempts" >&2; return 1; fi
+            echo "$1 login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
+            sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
+          done
+        }
+        builder="$BUILDER_IMAGE_IN"
+        runtime="$RUNTIME_IMAGE_IN"
+        cgr_ok=0; ib_ok=0
+        if [ -n "${CGR_PULL_TOKEN:-}" ]; then
+          login_retry cgr.dev "$CGR_PULL_USERNAME" "$CGR_PULL_TOKEN"
+          echo "Hardened bases: Chainguard (cgr.dev) authenticated"
+          cgr_ok=1
+        fi
+        if [ -n "${IRONBANK_TOKEN:-}" ]; then
+          login_retry "$IRONBANK_REGISTRY" "$IRONBANK_USERNAME" "$IRONBANK_TOKEN"
+          echo "Hardened bases: Iron Bank (${IRONBANK_REGISTRY}) authenticated"
+          ib_ok=1
+        fi
+        # Primary base failover: only swap the primary's builder/runtime to the
+        # ironbank_* images when Chainguard is absent but Iron Bank is present
+        # (preserves the original single-tier behavior). With both authenticated,
+        # the primary keeps its Chainguard bases and extra images pull their own
+        # Iron Bank bases from the now-logged-in registry.
+        if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 1 ]; then
+          [ -n "$IB_BUILDER_IMAGE" ] && builder="$IB_BUILDER_IMAGE"
+          [ -n "$IB_RUNTIME_IMAGE" ] && runtime="$IB_RUNTIME_IMAGE"
+          echo "::notice::CGR_PULL_TOKEN not configured — using Iron Bank (${IRONBANK_REGISTRY}) for primary bases"
+        fi
+        if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 0 ]; then
+          if [ "$REQUIRE_HARDENED_BASES" = 'true' ]; then
+            echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
+            exit 1
+          fi
+          echo "::warning::Proxy-scan posture: no hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login. Vulnerability Scan will cover this gate-reachable image only; a green result is not proof the approved production image is clean."
+        fi
+        echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
+        echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"

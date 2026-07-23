@@ -221,6 +221,10 @@ a trigger-only PR into it from the canonical canary branch **`ci-scans-canary`**
    fresh run after a caller change by merging the updated `ci-scans` head into
    `ci-scans-canary` (`gh api -X POST repos/<owner>/<repo>/merges -f
    base=ci-scans-canary -f head=ci-scans`).
+   Keep the PR a **draft** (`gh pr ready <n> --undo`): `pull_request` triggers
+   fire on drafts just the same, draft status signals "trigger vehicle, not a
+   merge candidate", and it mutes the re-review churn a wildcard `CODEOWNERS`
+   rule would otherwise generate on every push.
 4. Comment the per-job results table and run URL on the canary PR as evidence
    (see `c3-e/c3cdao-ppubs#33` for the reference shape).
 

@@ -38,6 +38,11 @@
       "description": "Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend).",
       "type": "string"
     },
+    "contract_file": {
+      "default": "Makefile.ci",
+      "description": "Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. Only read when use_ci_contract is true. Start from templates/consumer/Makefile.ci.",
+      "type": "string"
+    },
     "dockerfile": {
       "default": "containers/backend/Dockerfile",
       "description": "Path to the backend Dockerfile in the consumer repo.",
@@ -147,6 +152,11 @@
       "default": "",
       "description": "Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage \u2014 set explicitly when a trailing dev/debug/test stage would otherwise win.",
       "type": "string"
+    },
+    "use_ci_contract": {
+      "default": false,
+      "description": "Consumer build contract flag. false (default): the gate owns build knowledge \u2014 images build from the dockerfile/context/target/APP_* inputs, secctx uses secctx_make_target, and cluster-smoke provisions its inline Postgres/secret/CRD scaffold (current behavior, unchanged). true: the consumer repo owns build knowledge via contract_file \u2014 the containers list comes from `make ci-manifest` (extra_containers is ignored; manifest images[0] is the primary, images[1:] are the extras), each image builds via `make ci-build IMAGE=<name>` with CI_BUILDER_BASE/CI_RUNTIME_BASE/CI_IMAGE_TAG env, secctx runs `make ci-secctx`, and cluster-smoke provisions via `make ci-smoke-env NAMESPACE=<ns>`. The gate's bundled restricted-PSS assertion runs in-gate on BOTH paths \u2014 it is gate policy and cannot be delegated. See docs/CI-CONTRACT.md.",
+      "type": "boolean"
     }
   },
   "title": "Security gate request contract (workflow_call inputs)",

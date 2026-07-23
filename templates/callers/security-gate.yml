@@ -59,3 +59,5 @@ jobs:
       smoke_workload_match: backend  # case-insensitive substring identifying the backend Deployment/Service in cluster-smoke; set this if your deployment name has no 'backend'
       image_only: false  # true: skip helm-check + cluster-smoke (image build/scan only); keep false for deployable apps
       extra_containers: ""  # extras to build + image-scan (JSON array). Prefer a multiline '|' block — one object per entry; never a single-line quoted array. "" = none. Optional per-entry target. Shape: docs/INPUTS.md
+      use_ci_contract: false  # true: your repo owns build knowledge via a contract makefile (ci-manifest / ci-build / ci-secctx / ci-smoke-env targets) — see docs/CI-CONTRACT.md; false (default): the gate-owned build inputs above apply
+      contract_file: Makefile.ci  # path of your contract makefile, read only when use_ci_contract is true; start from templates/consumer/Makefile.ci

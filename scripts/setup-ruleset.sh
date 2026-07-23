@@ -9,7 +9,7 @@ usage() {
   cat <<'EOF'
 usage: setup-ruleset.sh --config <yaml> [--enable] [--dry-run]
 
-Creates/updates ruleset from config profile required_checks.
+Creates/updates ruleset requiring the security-scan / Security Gate check.
 Default enforcement: disabled (safe rollout).
 EOF
 }
@@ -37,7 +37,6 @@ repo="$(json_get "$json" '.target.repo')"
 ruleset_name="$(json_get "$json" '.ruleset.name')"
 ruleset_id="$(json_get "$json" '.ruleset.ruleset_id')"
 integration_id="$(json_get "$json" '.ruleset.github_actions_integration_id')"
-profile="$(json_get "$json" '.ruleset.profile')"
 target_branch="$(json_get "$json" '.ruleset.target_branch')"
 [[ -z "$integration_id" ]] && integration_id=15368
 [[ -z "$ruleset_name" ]] && ruleset_name="security-scan-gates"
@@ -52,13 +51,9 @@ ref_include="[\"~DEFAULT_BRANCH\"]"
 enforcement="disabled"
 [[ "$ENABLE" -eq 1 ]] && enforcement="active"
 
-checks=()
-while IFS= read -r line; do
-  [[ -n "$line" ]] && checks+=("$line")
-done < <(apply_check_overrides "$json")
-[[ ${#checks[@]} -gt 0 ]] || die "no required checks for profile $profile"
-
-checks_json="$(printf '%s\n' "${checks[@]}" | jq -R -s 'split("\n") | map(select(length>0)) | map({context: ., integration_id: '"$integration_id"'})')"
+# The one supported profile (unified-gate) always resolved to this single
+# check context; the profile YAML indirection was removed as dead weight.
+checks_json="$(jq -n '[{context: "security-scan / Security Gate", integration_id: '"$integration_id"'}]')"
 
 payload="$(jq -n \
   --arg name "$ruleset_name" \

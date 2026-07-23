@@ -16,18 +16,18 @@ import sys
 from typing import Any
 
 
-def blocking_jobs(image_only: bool, extra_containers: str) -> list[str]:
-    blocking = ["caller-lint", "phase1-build", "secrets-scan", "vuln-scan"]
+def blocking_jobs(image_only: bool) -> list[str]:
+    # build and image-scan are matrixed over the normalized containers list
+    # (primary + extras): the job fails when any leg fails, so the former
+    # conditional build-extra/vuln-scan-extra membership is subsumed.
+    blocking = ["caller-lint", "build", "secrets-scan", "image-scan"]
     if not image_only:
         blocking[3:3] = ["helm-check", "cluster-smoke"]
-    extra = extra_containers or ""
-    if extra not in ("", "[]"):
-        blocking += ["build-extra", "vuln-scan-extra"]
     return blocking
 
 
-def evaluate(needs: dict[str, Any], image_only: bool, extra_containers: str) -> int:
-    blocking = blocking_jobs(image_only, extra_containers)
+def evaluate(needs: dict[str, Any], image_only: bool) -> int:
+    blocking = blocking_jobs(image_only)
     bad = {
         k: needs.get(k, {}).get("result")
         for k in blocking
@@ -52,8 +52,7 @@ def evaluate(needs: dict[str, Any], image_only: bool, extra_containers: str) -> 
 def main() -> None:
     needs = json.loads(os.environ["NEEDS_JSON"])
     image_only = (os.environ.get("IMAGE_ONLY") or "").lower() == "true"
-    extra = os.environ.get("EXTRA_CONTAINERS") or ""
-    raise SystemExit(evaluate(needs, image_only, extra))
+    raise SystemExit(evaluate(needs, image_only))
 
 
 if __name__ == "__main__":

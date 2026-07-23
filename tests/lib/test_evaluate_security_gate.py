@@ -33,76 +33,72 @@ def test_image_only_omits_helm_and_smoke():
     needs = _needs(
         {
             "caller-lint": "success",
-            "phase1-build": "success",
+            "build": "success",
             "secrets-scan": "success",
-            "vuln-scan": "success",
+            "image-scan": "success",
             "helm-check": "skipped",
             "cluster-smoke": "skipped",
         }
     )
-    assert mod.evaluate(needs, image_only=True, extra_containers="") == 0
+    assert mod.evaluate(needs, image_only=True) == 0
 
 
 def test_app_mode_requires_helm_and_smoke_ok():
     needs = _needs(
         {
             "caller-lint": "success",
-            "phase1-build": "success",
+            "build": "success",
             "secrets-scan": "success",
-            "vuln-scan": "success",
+            "image-scan": "success",
             "helm-check": "success",
             "cluster-smoke": "success",
         },
         smoke_ok="true",
     )
-    assert mod.evaluate(needs, image_only=False, extra_containers="") == 0
+    assert mod.evaluate(needs, image_only=False) == 0
 
 
 def test_smoke_continue_on_error_false_green():
     needs = _needs(
         {
             "caller-lint": "success",
-            "phase1-build": "success",
+            "build": "success",
             "secrets-scan": "success",
-            "vuln-scan": "success",
+            "image-scan": "success",
             "helm-check": "success",
             "cluster-smoke": "success",
         },
         smoke_ok="false",
     )
-    assert mod.evaluate(needs, image_only=False, extra_containers="") == 1
+    assert mod.evaluate(needs, image_only=False) == 1
 
 
-def test_extras_blocking_when_declared():
+def test_matrixed_build_failure_blocks():
+    # Extras are legs of the matrixed build job: any failed leg fails the
+    # whole job, so a single result covers the former build-extra membership.
     needs = _needs(
         {
             "caller-lint": "success",
-            "phase1-build": "success",
+            "build": "failure",
             "secrets-scan": "success",
-            "vuln-scan": "success",
+            "image-scan": "skipped",
             "helm-check": "success",
-            "cluster-smoke": "success",
-            "build-extra": "failure",
-            "vuln-scan-extra": "success",
-        },
-        smoke_ok="true",
+            "cluster-smoke": "skipped",
+        }
     )
-    assert mod.evaluate(needs, image_only=False, extra_containers='[{"name":"x"}]') == 1
+    assert mod.evaluate(needs, image_only=False) == 1
 
 
-def test_empty_extras_not_blocking():
+def test_matrixed_image_scan_failure_blocks():
     needs = _needs(
         {
             "caller-lint": "success",
-            "phase1-build": "success",
+            "build": "success",
             "secrets-scan": "success",
-            "vuln-scan": "success",
+            "image-scan": "failure",
             "helm-check": "success",
             "cluster-smoke": "success",
-            "build-extra": "skipped",
-            "vuln-scan-extra": "skipped",
         },
         smoke_ok="true",
     )
-    assert mod.evaluate(needs, image_only=False, extra_containers="") == 0
-    assert mod.evaluate(needs, image_only=False, extra_containers="[]") == 0
+    assert mod.evaluate(needs, image_only=False) == 1

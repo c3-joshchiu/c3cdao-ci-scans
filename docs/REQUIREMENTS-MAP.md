@@ -12,16 +12,14 @@ Source of truth for the job list is
 
 | Job | Spec gate / requirement | Tool(s) | Target | Current posture | Alignment |
 |---|---|---|---|---|---|
-| `caller-lint` | (scaffolding pre-flight — not a spec gate) | `lint_caller.py` | caller config | always fail-closed | aligned (guards the gate) |
-| `phase1-build` | build hardened image + dual-registry login (CGR and/or Iron Bank) | Docker + CGR/Iron Bank | image | always blocking | aligned |
+| `caller-lint` | (scaffolding pre-flight — not a spec gate) | `lint_caller.py` + consumer contract validation | caller config + `Makefile.ci` | always fail-closed | aligned (guards the gate) |
+| `build` | build hardened images via consumer contract (`make ci-build`, matrixed over the manifest images) + dual-registry login (CGR and/or Iron Bank) | Docker + CGR/Iron Bank | images | always blocking | aligned |
 | `secrets-scan` | Secrets detection | TruffleHog | source | job blocking; finding advisory until `SECURITY_SCAN_BLOCKING=true` | aligned |
 | `sast-semgrep` | SAST | Semgrep | source | warn-only (`continue-on-error`) | intentional ramp |
 | `sast-sonarqube` | SAST | SonarQube | source | warn-only (`continue-on-error`) | intentional ramp |
 | `helm-check` | Helm lint + restricted-PSS | helm + PSS assert | chart | blocking unless `image_only` | aligned |
 | `cluster-smoke` | kind deploy + health probe (+ kind-load extras, optional `smoke_secrets`) | kind + kubectl | chart+image | skipped when `image_only`; else advisory until `SECURITY_SCAN_BLOCKING=true` | intentional ramp |
-| `vuln-scan` | Image + SBOM vuln scan | Trivy (image+source SBOM) + Grype (image+source+image SBOM) | image + SBOM | advisory until `SECURITY_SCAN_BLOCKING=true` | aligned (Trivy covers the SBOM requirement via the source SBOM; the image SBOM is scanned by Grype) |
-| `build-extra` | multi-container build (frontend+backend) | Docker matrix | extra images | blocking only when `extra_containers` set | closes spec's "frontend AND backend" |
-| `vuln-scan-extra` | multi-container image scan | Trivy/Grype | extra images | blocking only when `extra_containers` set | closes spec's "frontend AND backend" |
+| `image-scan` | Image + SBOM vuln scan (matrixed over the same manifest images as `build`) | Trivy (image+source SBOM) + Grype (image+source+image SBOM) | images + SBOM | advisory until `SECURITY_SCAN_BLOCKING=true` | aligned (Trivy covers the SBOM requirement via the source SBOM; the image SBOM is scanned by Grype) |
 | `security-gate` | aggregate required check | — | — | the one required check | aligned |
 
 ## Deliberate deviations & path to steady-state
@@ -30,7 +28,7 @@ These are intentional posture choices, not gaps to remediate now.
 
 ### Warn-only SAST and advisory cluster-smoke/vuln-scan are a verification ramp
 
-Semgrep and SonarQube run warn-only, and cluster-smoke and vuln-scan stay
+Semgrep and SonarQube run warn-only, and cluster-smoke and image-scan stay
 advisory, until the operator sets the `SECURITY_SCAN_BLOCKING=true` repo
 variable. This is a deliberate ramp: it lets a consumer verify the technical
 implementation — that every job runs, resolves its inputs, and produces signal —
@@ -41,14 +39,14 @@ steady-state, never a defect. A skipped, cancelled, or errored blocking job
 still fails the gate regardless of the flag, so a broken build can never sign
 off green.
 
-### `extra_containers` fulfills the "frontend AND backend" requirement
+### Manifest extras fulfill the "frontend AND backend" requirement
 
 The spec requires scanning both the frontend **and** backend images. The
-primary `phase1-build`/`vuln-scan` path covers the backend; `extra_containers`
-(the `build-extra` and `vuln-scan-extra` jobs) builds and image-scans every
-additional container — the frontend and any sidecars — so the multi-image
-scanning requirement is met. Single-image consumers leave `extra_containers`
-empty and those jobs skip cleanly.
+`build` and `image-scan` jobs matrix over every image the consumer's
+`ci-manifest` declares: `images[0]` (the backend primary) plus every extra
+entry — the frontend and any sidecars — so the multi-image scanning
+requirement is met. Single-image consumers declare one manifest image and run
+a one-leg matrix.
 
 ### Out of scope for the reusable gate (named, not silently missing)
 
@@ -67,4 +65,4 @@ Two spec items are intentionally owned elsewhere:
   scans images whose bases are pullable via `cgr.dev` / `registry1.dso.mil`.
   Private-mirror or entitlement-unreachable prod bases (and attestation that the
   *approved* image is clean) remain with the consumer IL5 / Game Warden pipeline.
-  When `require_hardened_bases: false`, vuln-scan labels a **proxy scan**.
+  When `require_hardened_bases: false`, image-scan labels a **proxy scan**.

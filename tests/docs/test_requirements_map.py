@@ -56,9 +56,9 @@ def test_blocking_flip_is_final():
     assert re.search(r"final|last|steady-state", text, re.IGNORECASE)
 
 
-def test_extra_containers_credited():
+def test_manifest_extras_credited():
     text = REQ_MAP.read_text()
-    assert "extra_containers" in text
+    assert re.search(r"manifest extras", text, re.IGNORECASE)
     assert re.search(r"frontend", text, re.IGNORECASE)
 
 
@@ -83,7 +83,7 @@ def lint_rule_ids():
 
 def test_all_lint_rules_documented():
     rules = lint_rule_ids()
-    assert len(rules) == 18, f"expected 18 lint rule ids, parsed {rules}"
+    assert len(rules) == 14, f"expected 14 lint rule ids, parsed {rules}"
     text = RUNBOOK.read_text()
     missing = [r for r in rules if r not in text]
     assert not missing, f"lint rules missing from RUNBOOK.md: {missing}"

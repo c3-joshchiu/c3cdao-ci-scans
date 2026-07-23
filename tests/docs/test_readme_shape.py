@@ -34,11 +34,11 @@ def test_ruleset_named_plainly():
     assert "repository ruleset" in _text().lower()
 
 
-def test_prereqs_reference_config():
-    """AC-4: prerequisites reference the new configurability inputs."""
+def test_prereqs_reference_contract():
+    """AC-4: prerequisites reference the consumer build contract."""
     text = _text()
-    assert "extra_containers" in text
-    assert "health_path" in text
+    assert "ci-manifest" in text
+    assert "docs/CI-CONTRACT.md" in text
 
 
 def test_caller_lint_framed():

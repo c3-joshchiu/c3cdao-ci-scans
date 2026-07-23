@@ -14,6 +14,9 @@ Modes:
     (no args)              extract schema + docs/INPUTS.md table
     --check-descriptions   exit non-zero listing inputs with missing/blank
                            descriptions; writes nothing
+    --emit-confluence      print the API reference (inputs + secrets) as
+                           Confluence storage-format XHTML on stdout;
+                           writes nothing
 
 Also importable by sibling scripts:
     load_gha_workflow(path) -> dict (triggers normalized under "on")
@@ -24,6 +27,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 import yaml
 
@@ -162,11 +166,157 @@ def write_inputs_table(inputs: dict[str, Any]) -> None:
             raise SystemExit(f"error: {INPUTS_DOC_PATH}: {e}") from e
 
 
+# --- Confluence API-reference emitter (--emit-confluence) -------------------
+
+# Section order for the Confluence reference. Inputs not named here fall
+# through to a trailing "Other inputs" section, so new workflow inputs are
+# never silently dropped from the page.
+_CONFLUENCE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Core build inputs",
+        (
+            "scan_image",
+            "dockerfile",
+            "context",
+            "target",
+            "builder_image",
+            "runtime_image",
+            "runtime_apks",
+            "extra_build_args",
+            "app_path",
+            "app_package",
+            "app_module",
+            "app_port",
+            "extra_containers",
+        ),
+    ),
+    (
+        "Helm and cluster-smoke inputs",
+        (
+            "helm_chart_path",
+            "helm_values_file",
+            "helm_values_local_file",
+            "helm_release_name",
+            "cluster_name",
+            "namespace",
+            "secctx_make_target",
+            "health_path",
+            "service_port",
+            "smoke_workload_match",
+            "smoke_secrets",
+            "image_only",
+        ),
+    ),
+    (
+        "Hardened-base and failover inputs",
+        (
+            "require_hardened_bases",
+            "ironbank_registry",
+            "ironbank_builder_image",
+            "ironbank_runtime_image",
+        ),
+    ),
+    (
+        "Consumer build-contract inputs",
+        ("use_ci_contract", "contract_file"),
+    ),
+)
+
+# The workflow declares secrets with `required` only; purpose text mirrors
+# the "Required secrets" table in docs/RUNBOOK.md.
+_SECRET_PURPOSE = {
+    "CGR_PULL_TOKEN": ("Phase 1 build - Chainguard (cgr.dev) registry login token."),
+    "CGR_PULL_USERNAME": (
+        "Phase 1 build - Chainguard (cgr.dev) registry login username."
+    ),
+    "IRONBANK_TOKEN": (
+        "SonarQube ephemeral + phase 1 / build-extra Iron Bank "
+        "(registry1.dso.mil) login token - runs alongside Chainguard when "
+        "both are set."
+    ),
+    "IRONBANK_USERNAME": (
+        "Iron Bank (registry1.dso.mil) login username, paired with IRONBANK_TOKEN."
+    ),
+}
+
+_TABLE_HEADER = (
+    "<tr><th>Input</th><th>Type</th><th>Default</th>"
+    "<th>Required</th><th>Description</th></tr>"
+)
+
+
+def workflow_secrets(path: Path) -> dict[str, Any]:
+    """Return the workflow_call.secrets mapping (empty dict when absent)."""
+    wf = load_gha_workflow(path)
+    on = wf["on"] if isinstance(wf["on"], dict) else {}
+    secrets = (on.get("workflow_call") or {}).get("secrets")
+    return secrets if isinstance(secrets, dict) else {}
+
+
+def _xml(value: Any) -> str:
+    return escape(str(value))
+
+
+def _shown_default(default: Any) -> str:
+    if isinstance(default, bool):
+        return "true" if default else "false"
+    return str(default) or '""'
+
+
+def _input_row(name: str, spec: dict[str, Any]) -> str:
+    required = "yes" if spec.get("required") else "no"
+    return (
+        "<tr>"
+        f"<td><code>{_xml(name)}</code></td>"
+        f"<td>{_xml(spec['type'])}</td>"
+        f"<td><code>{_xml(_shown_default(spec['default']))}</code></td>"
+        f"<td>{required}</td>"
+        f"<td>{_xml(spec['description'])}</td>"
+        "</tr>"
+    )
+
+
+def render_confluence(inputs: dict[str, Any], secrets: dict[str, Any]) -> str:
+    """Render the full inputs + secrets reference as storage-format XHTML."""
+    grouped = {name for _, members in _CONFLUENCE_SECTIONS for name in members}
+    leftovers = tuple(name for name in inputs if name not in grouped)
+    sections = _CONFLUENCE_SECTIONS + (("Other inputs", leftovers),)
+    parts: list[str] = []
+    for title, members in sections:
+        rows = [_input_row(n, inputs[n]) for n in members if n in inputs]
+        if not rows:
+            continue
+        parts.append(f"<h2>{_xml(title)}</h2>")
+        parts.append(
+            "<table><tbody>" + _TABLE_HEADER + "".join(rows) + "</tbody></table>"
+        )
+    if secrets:
+        parts.append("<h2>Secrets</h2>")
+        srows = [
+            "<tr>"
+            f"<td><code>{_xml(name)}</code></td>"
+            f"<td>{'yes' if (spec or {}).get('required') else 'no'}</td>"
+            f"<td>{_xml(_SECRET_PURPOSE.get(name, ''))}</td>"
+            "</tr>"
+            for name, spec in secrets.items()
+        ]
+        parts.append(
+            "<table><tbody>"
+            "<tr><th>Secret</th><th>Required</th><th>Purpose</th></tr>"
+            + "".join(srows)
+            + "</tbody></table>"
+        )
+    return "\n".join(parts)
+
+
 def main(argv: list[str]) -> int:
     inputs = workflow_inputs(WORKFLOW_PATH)
     if "--check-descriptions" in argv:
         check_descriptions(inputs)
         print(f"OK: {len(inputs)} inputs, all described")
+        return 0
+    if "--emit-confluence" in argv:
+        print(render_confluence(inputs, workflow_secrets(WORKFLOW_PATH)))
         return 0
     schema_text = json.dumps(build_schema(inputs), indent=2, sort_keys=True) + "\n"
     try:

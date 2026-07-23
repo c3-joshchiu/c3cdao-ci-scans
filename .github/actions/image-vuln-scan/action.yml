@@ -1,0 +1,82 @@
+# Image-side vulnerability scanning shared by vuln-scan and vuln-scan-extra:
+# default scanner configs, docker-load the built image artifact, Trivy image
+# scan, Grype image scan, Grype image-SBOM scan. Source-SBOM generation and
+# source scans stay in the primary vuln-scan job (whole-repo, run once).
+# Same SECURITY_SCAN_BLOCKING exit-code semantics in every consumer — the
+# caller passes vars.SECURITY_SCAN_BLOCKING through blocking.
+name: Image vulnerability scan (Trivy + Grype)
+description: >-
+  Default .trivyignore/.grype.yaml when the consumer lacks them, download and
+  docker-load the image tarball artifact, download the image SBOM artifact,
+  then run Trivy (image) and Grype (image + image SBOM). Blocking behavior is
+  driven by the blocking input (vars.SECURITY_SCAN_BLOCKING).
+inputs:
+  image-tag:
+    description: "Local-daemon tag to scan (restored by docker load)."
+    required: true
+  image-artifact-name:
+    description: "Artifact name of the docker-save tarball (e.g. scan-image, scan-image-<name>)."
+    required: true
+  sbom-artifact-name:
+    description: "Artifact name of the image SBOM (e.g. sbom-image, sbom-image-<name>); download-artifact writes the file named after artifact-name."
+    required: true
+  trivy-severity:
+    description: "Trivy severity filter (env.TRIVY_SEVERITY)."
+    required: true
+  blocking:
+    description: "'true' makes scans fail the build (vars.SECURITY_SCAN_BLOCKING); anything else reports only."
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    # Consumers aren't required to carry scanner config files — default to
+    # empty ones so Trivy/Grype don't error on a missing path.
+    - name: Default scanner configs when consumer lacks them
+      shell: bash
+      run: |
+        [ -f .trivyignore ] || : > .trivyignore
+        [ -f .grype.yaml ] || echo 'ignore: []' > .grype.yaml
+
+    - name: Download image artifact
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      with:
+        name: ${{ inputs.image-artifact-name }}
+
+    - name: Load image into local daemon
+      shell: bash
+      run: docker load -i image.tar
+
+    - name: Download image SBOM
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      with:
+        name: ${{ inputs.sbom-artifact-name }}
+
+    - name: Trivy scan — image
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
+      with:
+        image-ref: ${{ inputs.image-tag }}
+        format: table
+        severity: ${{ inputs.trivy-severity }}
+        exit-code: ${{ inputs.blocking == 'true' && '1' || '0' }}
+        # No ignore-unfixed: the modular pr-gate/sca-scan surfaced unfixed
+        # HIGH/CRITICAL too, so we keep reporting them (no coverage reduction).
+        trivyignores: .trivyignore
+
+    - name: Grype scan — image
+      uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+      with:
+        image: ${{ inputs.image-tag }}
+        severity-cutoff: high
+        fail-build: ${{ inputs.blocking == 'true' }}
+        output-format: table
+        config: .grype.yaml
+
+    - name: Grype scan — image SBOM
+      uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
+      with:
+        sbom: ${{ inputs.sbom-artifact-name }}  # anchore/sbom-action stores artifact as file named after artifact-name
+        severity-cutoff: high
+        fail-build: ${{ inputs.blocking == 'true' }}
+        output-format: table
+        config: .grype.yaml

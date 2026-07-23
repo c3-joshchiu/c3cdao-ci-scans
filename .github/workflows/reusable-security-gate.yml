@@ -318,76 +318,54 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
+      # Callee (ci-scans) checkout at the caller-pinned ref: this reusable
+      # workflow runs cross-repo, so `uses: ./.github/actions/...` would
+      # resolve against the CALLER's tree. Local composite actions are
+      # referenced from this .ci-scans checkout instead.
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//')"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ steps.calleeref.outputs.ref }}
+          path: .ci-scans
+
       # The backend image is large (WeasyPrint + psql deps). Building it, loading
       # it into Docker, and `docker save`-ing it for the artifact exhausts the
       # hosted runner's ~14 GB free disk. Reclaim ~20 GB of unused toolchains.
       - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          sudo docker image prune -af 2>/dev/null || true
-          df -h /
+        uses: ./.ci-scans/.github/actions/free-disk-space
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      # Hardened-base login: authenticate to Chainguard (cgr.dev) when CGR_PULL_*
-      # is set AND to Iron Bank (registry1.dso.mil) when IRONBANK_* is set — both
-      # sessions can be active at once, so a repo whose images span both registries
-      # (e.g. a Chainguard primary with Iron Bank extra_containers) builds in a
-      # single run. If only Iron Bank is configured, the primary's builder/runtime
-      # optionally swap to the ironbank_* image inputs. With neither,
-      # require_hardened_bases decides: fail (default) or warn and build on the
-      # consumer-specified bases.
+      # Hardened-base login + primary-base failover resolution — shared with
+      # build-extra (see the action's description for the failover semantics).
       - name: Login to hardened base registries (Chainguard + Iron Bank)
         id: base-registry
-        env:
-          CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
-          CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
-          IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
-          IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
-          IRONBANK_REGISTRY: ${{ inputs.ironbank_registry }}
-        run: |
-          set -uo pipefail
-          login_retry() { # <registry> <username> <token>
-            local attempt=1 delay=15
-            until printf '%s' "$3" | docker login "$1" -u "$2" --password-stdin; do
-              if [ "$attempt" -ge 4 ]; then echo "$1 login failed after 4 attempts" >&2; return 1; fi
-              echo "$1 login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
-              sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
-            done
-          }
-          builder='${{ inputs.builder_image }}'
-          runtime='${{ inputs.runtime_image }}'
-          cgr_ok=0; ib_ok=0
-          if [ -n "${CGR_PULL_TOKEN:-}" ]; then
-            login_retry cgr.dev "$CGR_PULL_USERNAME" "$CGR_PULL_TOKEN"
-            echo "Hardened bases: Chainguard (cgr.dev) authenticated"
-            cgr_ok=1
-          fi
-          if [ -n "${IRONBANK_TOKEN:-}" ]; then
-            login_retry "$IRONBANK_REGISTRY" "$IRONBANK_USERNAME" "$IRONBANK_TOKEN"
-            echo "Hardened bases: Iron Bank (${IRONBANK_REGISTRY}) authenticated"
-            ib_ok=1
-          fi
-          # Primary base failover: only swap the primary's builder/runtime to the
-          # ironbank_* images when Chainguard is absent but Iron Bank is present
-          # (preserves the original single-tier behavior). With both authenticated,
-          # the primary keeps its Chainguard bases and extra images pull their own
-          # Iron Bank bases from the now-logged-in registry.
-          if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 1 ]; then
-            [ -n '${{ inputs.ironbank_builder_image }}' ] && builder='${{ inputs.ironbank_builder_image }}'
-            [ -n '${{ inputs.ironbank_runtime_image }}' ] && runtime='${{ inputs.ironbank_runtime_image }}'
-            echo "::notice::CGR_PULL_TOKEN not configured — using Iron Bank (${IRONBANK_REGISTRY}) for primary bases"
-          fi
-          if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 0 ]; then
-            if [ '${{ inputs.require_hardened_bases }}' = 'true' ]; then
-              echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
-              exit 1
-            fi
-            echo "::warning::Proxy-scan posture: no hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login. Vulnerability Scan will cover this gate-reachable image only; a green result is not proof the approved production image is clean."
-          fi
-          echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
-          echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"
+        uses: ./.ci-scans/.github/actions/hardened-registry-login
+        with:
+          cgr-pull-token: ${{ secrets.CGR_PULL_TOKEN }}
+          cgr-pull-username: ${{ secrets.CGR_PULL_USERNAME }}
+          ironbank-token: ${{ secrets.IRONBANK_TOKEN }}
+          ironbank-username: ${{ secrets.IRONBANK_USERNAME }}
+          ironbank-registry: ${{ inputs.ironbank_registry }}
+          builder-image: ${{ inputs.builder_image }}
+          runtime-image: ${{ inputs.runtime_image }}
+          ironbank-builder-image: ${{ inputs.ironbank_builder_image }}
+          ironbank-runtime-image: ${{ inputs.ironbank_runtime_image }}
+          require-hardened-bases: ${{ inputs.require_hardened_bases }}
 
       - name: Label proxy-scan posture
         if: inputs.require_hardened_bases == false || inputs.require_hardened_bases == 'false'
@@ -400,16 +378,13 @@ jobs:
             echo "$msg"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build scan image (local load, no push)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      - name: Build scan image (local load, no push) + SBOM + artifact
+        uses: ./.ci-scans/.github/actions/build-scan-image
         with:
           context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile }}
+          dockerfile: ${{ inputs.dockerfile }}
           target: ${{ inputs.target }}
-          push: false
-          load: true   # load into local daemon so Syft can scan + we can save it
-          tags: ${{ env.SCAN_IMAGE }}
-          platforms: linux/amd64
+          image-tag: ${{ env.SCAN_IMAGE }}
           build-args: |
             BUILDER_IMAGE=${{ steps.base-registry.outputs.builder_image }}
             RUNTIME_IMAGE=${{ steps.base-registry.outputs.runtime_image }}
@@ -419,35 +394,10 @@ jobs:
             APP_PORT=${{ inputs.app_port }}
             RUNTIME_APKS=${{ env.BACKEND_RUNTIME_APKS }}
             ${{ inputs.extra_build_args }}
-          cache-from: type=gha,scope=security-scan-backend
-          cache-to: type=gha,mode=max,scope=security-scan-backend
-          provenance: false
-
-      # Generate image SBOM while the image is in the local Docker daemon.
-      # Syft uses its own registry client, so scanning the local daemon image
-      # avoids any registry pull in a downstream job.
-      - name: Generate image SBOM (from local daemon)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
-        with:
-          image: ${{ env.SCAN_IMAGE }}
-          format: cyclonedx-json
-          output-file: sbom-image.json
-          artifact-name: sbom-image
-
-      # Hand the built image to downstream jobs as a transient artifact rather
-      # than a registry tag. upload-artifact uses the runner's built-in token —
-      # no GHCR, no `packages: write`, fork-safe. `docker load` restores the
-      # SCAN_IMAGE tag in vuln-scan and cluster-smoke.
-      - name: Save image to tarball
-        run: docker save "${{ env.SCAN_IMAGE }}" -o image.tar
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: ${{ env.IMAGE_ARTIFACT }}
-          path: image.tar
-          if-no-files-found: error
-          retention-days: 1
+          cache-scope: security-scan-backend
+          sbom-output-file: sbom-image.json
+          sbom-artifact-name: sbom-image
+          image-artifact-name: ${{ env.IMAGE_ARTIFACT }}
 
   # --------------------------------------------------------------------------
   # Secrets detection — TruffleHog (diff-aware, verified only)
@@ -1107,21 +1057,8 @@ jobs:
             echo "$msg"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Consumers aren't required to carry scanner config files — default to
-      # empty ones so Trivy/Grype don't error on a missing path.
-      - name: Default scanner configs when consumer lacks them
-        run: |
-          [ -f .trivyignore ] || : > .trivyignore
-          [ -f .grype.yaml ] || echo 'ignore: []' > .grype.yaml
-
-      - name: Download image artifact (built in phase1-build)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-        with:
-          name: ${{ env.IMAGE_ARTIFACT }}
-
-      - name: Load image into local daemon
-        run: docker load -i image.tar
-
+      # Source SBOM stays here (whole-repo, run once) — only the image-side
+      # scans are shared with vuln-scan-extra via the composite action.
       - name: Generate source SBOM (pnpm + uv)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
         with:
@@ -1130,22 +1067,41 @@ jobs:
           output-file: sbom-source.json
           artifact-name: sbom-source
 
-      - name: Download image SBOM (generated in phase1-build)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
-        with:
-          name: sbom-image
+      # Callee (ci-scans) checkout at the caller-pinned ref: this reusable
+      # workflow runs cross-repo, so `uses: ./.github/actions/...` would
+      # resolve against the CALLER's tree. Local composite actions are
+      # referenced from this .ci-scans checkout instead.
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//')"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
-
-      - name: Trivy scan — image
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          image-ref: ${{ needs.phase1-build.outputs.image }}
-          format: table
-          severity: ${{ env.TRIVY_SEVERITY }}
-          exit-code: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' && '1' || '0' }}
-          # No ignore-unfixed: the modular pr-gate/sca-scan surfaced unfixed
-          # HIGH/CRITICAL too, so we keep reporting them (no coverage reduction).
-          trivyignores: .trivyignore
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ steps.calleeref.outputs.ref }}
+          path: .ci-scans
+
+      # Default scanner configs + image load + Trivy image + Grype image +
+      # Grype image-SBOM (also creates .trivyignore/.grype.yaml defaults the
+      # source-SBOM scans below rely on).
+      - name: Image vulnerability scan (Trivy + Grype)
+        uses: ./.ci-scans/.github/actions/image-vuln-scan
+        with:
+          image-tag: ${{ needs.phase1-build.outputs.image }}
+          image-artifact-name: ${{ env.IMAGE_ARTIFACT }}
+          sbom-artifact-name: sbom-image
+          trivy-severity: ${{ env.TRIVY_SEVERITY }}
+          blocking: ${{ vars.SECURITY_SCAN_BLOCKING }}
 
       - name: Trivy scan — source SBOM
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
@@ -1159,28 +1115,10 @@ jobs:
       # Trivy is not run on the image SBOM (Syft-SBOM incompatibility); the
       # direct Trivy image scan above covers those packages.
 
-      - name: Grype scan — image
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        with:
-          image: ${{ needs.phase1-build.outputs.image }}
-          severity-cutoff: high
-          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
-          output-format: table
-          config: .grype.yaml
-
       - name: Grype scan — source SBOM
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
         with:
           sbom: sbom-source.json
-          severity-cutoff: high
-          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
-          output-format: table
-          config: .grype.yaml
-
-      - name: Grype scan — image SBOM
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        with:
-          sbom: sbom-image  # anchore/sbom-action stores artifact as file named after artifact-name
           severity-cutoff: high
           fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
           output-format: table
@@ -1222,67 +1160,52 @@ jobs:
           RAW: ${{ matrix.container.image || format('{0}:local', matrix.container.name) }}
         run: echo "tag=$RAW" >> "$GITHUB_OUTPUT"
 
-      # keep in sync with phase1-build "Free disk space"
-      - name: Free disk space
+      # Callee (ci-scans) checkout at the caller-pinned ref: this reusable
+      # workflow runs cross-repo, so `uses: ./.github/actions/...` would
+      # resolve against the CALLER's tree. Local composite actions are
+      # referenced from this .ci-scans checkout instead.
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-            /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
-          sudo docker image prune -af 2>/dev/null || true
-          df -h /
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//')"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ steps.calleeref.outputs.ref }}
+          path: .ci-scans
+
+      # shared with phase1-build "Free disk space"
+      - name: Free disk space
+        uses: ./.ci-scans/.github/actions/free-disk-space
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      # keep in sync with phase1-build "Login to hardened base registry"
+      # shared with phase1-build — extras inherit the primary-base failover
+      # behavior bit-for-bit (see the action's description).
       - name: Login to hardened base registries (Chainguard + Iron Bank)
         id: base-registry
-        env:
-          CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
-          CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
-          IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
-          IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
-          IRONBANK_REGISTRY: ${{ inputs.ironbank_registry }}
-        run: |
-          set -uo pipefail
-          login_retry() { # <registry> <username> <token>
-            local attempt=1 delay=15
-            until printf '%s' "$3" | docker login "$1" -u "$2" --password-stdin; do
-              if [ "$attempt" -ge 4 ]; then echo "$1 login failed after 4 attempts" >&2; return 1; fi
-              echo "$1 login failed (attempt $attempt/4); retrying in ${delay}s..." >&2
-              sleep "$delay"; delay=$((delay * 2)); attempt=$((attempt + 1))
-            done
-          }
-          builder='${{ inputs.builder_image }}'
-          runtime='${{ inputs.runtime_image }}'
-          cgr_ok=0; ib_ok=0
-          if [ -n "${CGR_PULL_TOKEN:-}" ]; then
-            login_retry cgr.dev "$CGR_PULL_USERNAME" "$CGR_PULL_TOKEN"
-            echo "Hardened bases: Chainguard (cgr.dev) authenticated"
-            cgr_ok=1
-          fi
-          if [ -n "${IRONBANK_TOKEN:-}" ]; then
-            login_retry "$IRONBANK_REGISTRY" "$IRONBANK_USERNAME" "$IRONBANK_TOKEN"
-            echo "Hardened bases: Iron Bank (${IRONBANK_REGISTRY}) authenticated"
-            ib_ok=1
-          fi
-          # Primary base failover: only swap the primary's builder/runtime to the
-          # ironbank_* images when Chainguard is absent but Iron Bank is present
-          # (preserves the original single-tier behavior). With both authenticated,
-          # the primary keeps its Chainguard bases and extra images pull their own
-          # Iron Bank bases from the now-logged-in registry.
-          if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 1 ]; then
-            [ -n '${{ inputs.ironbank_builder_image }}' ] && builder='${{ inputs.ironbank_builder_image }}'
-            [ -n '${{ inputs.ironbank_runtime_image }}' ] && runtime='${{ inputs.ironbank_runtime_image }}'
-            echo "::notice::CGR_PULL_TOKEN not configured — using Iron Bank (${IRONBANK_REGISTRY}) for primary bases"
-          fi
-          if [ "$cgr_ok" = 0 ] && [ "$ib_ok" = 0 ]; then
-            if [ '${{ inputs.require_hardened_bases }}' = 'true' ]; then
-              echo "::error::No hardened-registry credentials — add CGR_PULL_TOKEN/CGR_PULL_USERNAME (Chainguard) and/or IRONBANK_TOKEN/IRONBANK_USERNAME (Iron Bank), or set require_hardened_bases: false to accept consumer-specified bases."
-              exit 1
-            fi
-            echo "::warning::Proxy-scan posture: no hardened-registry credentials and require_hardened_bases=false — building on consumer-specified bases without a registry login. Vulnerability Scan will cover this gate-reachable image only; a green result is not proof the approved production image is clean."
-          fi
-          echo "builder_image=$builder" >> "$GITHUB_OUTPUT"
-          echo "runtime_image=$runtime" >> "$GITHUB_OUTPUT"
+        uses: ./.ci-scans/.github/actions/hardened-registry-login
+        with:
+          cgr-pull-token: ${{ secrets.CGR_PULL_TOKEN }}
+          cgr-pull-username: ${{ secrets.CGR_PULL_USERNAME }}
+          ironbank-token: ${{ secrets.IRONBANK_TOKEN }}
+          ironbank-username: ${{ secrets.IRONBANK_USERNAME }}
+          ironbank-registry: ${{ inputs.ironbank_registry }}
+          builder-image: ${{ inputs.builder_image }}
+          runtime-image: ${{ inputs.runtime_image }}
+          ironbank-builder-image: ${{ inputs.ironbank_builder_image }}
+          ironbank-runtime-image: ${{ inputs.ironbank_runtime_image }}
+          require-hardened-bases: ${{ inputs.require_hardened_bases }}
 
       - name: Label proxy-scan posture
         if: inputs.require_hardened_bases == false || inputs.require_hardened_bases == 'false'
@@ -1298,44 +1221,21 @@ jobs:
       # Base-image args come from the login step; the primary APP_*/RUNTIME_APKS
       # args are backend-specific, so extra containers carry their own overrides
       # via matrix.container.build_args (a newline-joined string).
-      - name: Build extra image (local load, no push)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+      - name: Build extra image (local load, no push) + SBOM + artifact
+        uses: ./.ci-scans/.github/actions/build-scan-image
         with:
           context: ${{ matrix.container.context || '.' }}
-          file: ${{ matrix.container.dockerfile }}
+          dockerfile: ${{ matrix.container.dockerfile }}
           target: ${{ matrix.container.target }}
-          push: false
-          load: true
-          tags: ${{ steps.img.outputs.tag }}
-          platforms: linux/amd64
+          image-tag: ${{ steps.img.outputs.tag }}
           build-args: |
             BUILDER_IMAGE=${{ steps.base-registry.outputs.builder_image }}
             RUNTIME_IMAGE=${{ steps.base-registry.outputs.runtime_image }}
             ${{ matrix.container.build_args }}
-          cache-from: type=gha,scope=security-scan-${{ matrix.container.name }}
-          cache-to: type=gha,mode=max,scope=security-scan-${{ matrix.container.name }}
-          provenance: false
-
-      - name: Generate image SBOM (from local daemon)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
-        with:
-          image: ${{ steps.img.outputs.tag }}
-          format: cyclonedx-json
-          output-file: sbom-image-${{ matrix.container.name }}.json
-          artifact-name: sbom-image-${{ matrix.container.name }}
-
-      - name: Save image to tarball
-        env:
-          IMG: ${{ steps.img.outputs.tag }}
-        run: docker save "$IMG" -o image.tar
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: scan-image-${{ matrix.container.name }}
-          path: image.tar
-          if-no-files-found: error
-          retention-days: 1
+          cache-scope: security-scan-${{ matrix.container.name }}
+          sbom-output-file: sbom-image-${{ matrix.container.name }}.json
+          sbom-artifact-name: sbom-image-${{ matrix.container.name }}
+          image-artifact-name: scan-image-${{ matrix.container.name }}
 
   # --------------------------------------------------------------------------
   # Vulnerability scan (extra containers) — image-only Trivy + Grype per leg.
@@ -1374,51 +1274,40 @@ jobs:
           RAW: ${{ matrix.container.image || format('{0}:local', matrix.container.name) }}
         run: echo "tag=$RAW" >> "$GITHUB_OUTPUT"
 
-      # keep in sync with vuln-scan "Default scanner configs when consumer lacks them"
-      - name: Default scanner configs when consumer lacks them
+      # Callee (ci-scans) checkout at the caller-pinned ref: this reusable
+      # workflow runs cross-repo, so `uses: ./.github/actions/...` would
+      # resolve against the CALLER's tree. Local composite actions are
+      # referenced from this .ci-scans checkout instead.
+      - name: Resolve callee (ci-scans) ref
+        id: calleeref
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          JOB_WF_SHA: ${{ github.job_workflow_sha }}
         run: |
-          [ -f .trivyignore ] || : > .trivyignore
-          [ -f .grype.yaml ] || echo 'ignore: []' > .grype.yaml
+          caller="${WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"; caller="${caller%%@*}"
+          ref=""
+          if [ -f "$caller" ]; then
+            ref="$(grep -oE 'reusable-security-gate\.yml@[^ ]+' "$caller" | head -1 | sed 's/.*@//')"
+          fi
+          ref="${ref:-${JOB_WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
-      - name: Download image artifact (built in build-extra)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
-          name: scan-image-${{ matrix.container.name }}
+          repository: c3-joshchiu/c3cdao-ci-scans
+          ref: ${{ steps.calleeref.outputs.ref }}
+          path: .ci-scans
 
-      - name: Load image into local daemon
-        run: docker load -i image.tar
-
-      - name: Download image SBOM (generated in build-extra)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+      # Default scanner configs + image load + Trivy image + Grype image +
+      # Grype image-SBOM — shared with the primary vuln-scan job.
+      - name: Image vulnerability scan (Trivy + Grype)
+        uses: ./.ci-scans/.github/actions/image-vuln-scan
         with:
-          name: sbom-image-${{ matrix.container.name }}
-
-      - name: Trivy scan — image
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # v0.35.0
-        with:
-          image-ref: ${{ steps.img.outputs.tag }}
-          format: table
-          severity: ${{ env.TRIVY_SEVERITY }}
-          exit-code: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' && '1' || '0' }}
-          trivyignores: .trivyignore
-
-      - name: Grype scan — image
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        with:
-          image: ${{ steps.img.outputs.tag }}
-          severity-cutoff: high
-          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
-          output-format: table
-          config: .grype.yaml
-
-      - name: Grype scan — image SBOM
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        with:
-          sbom: sbom-image-${{ matrix.container.name }}  # download-artifact writes the file named after artifact-name
-          severity-cutoff: high
-          fail-build: ${{ vars.SECURITY_SCAN_BLOCKING == 'true' }}
-          output-format: table
-          config: .grype.yaml
+          image-tag: ${{ steps.img.outputs.tag }}
+          image-artifact-name: scan-image-${{ matrix.container.name }}
+          sbom-artifact-name: sbom-image-${{ matrix.container.name }}
+          trivy-severity: ${{ env.TRIVY_SEVERITY }}
+          blocking: ${{ vars.SECURITY_SCAN_BLOCKING }}
 
   # --------------------------------------------------------------------------
   # Security Gate — aggregate required check

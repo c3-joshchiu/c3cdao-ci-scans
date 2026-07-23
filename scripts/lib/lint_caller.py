@@ -6,6 +6,13 @@
 
 Usage:
     lint_caller.py <caller.yml> --contract <schema.json> [--consumer-root <path>]
+    lint_caller.py --emit-containers
+
+``--emit-containers`` prints the normalized containers matrix (a single-line
+JSON array) built from resolved gate inputs passed via GATE_* env vars —
+primary entry first (derived from scan_image/dockerfile/context/target/APP_*),
+then one entry per extra_containers element. The gate's caller-lint job pipes
+it into GITHUB_OUTPUT; the build and image-scan jobs matrix over it.
 
 Exit 0 when clean; exit 1 with one line per violation on stdout:
     <rule-id>: <offending key/detail>
@@ -387,6 +394,108 @@ def check_smoke_secrets(with_map: dict[str, Any]) -> list[str]:
     return violations
 
 
+# --- normalized containers matrix (--emit-containers) -----------------------
+# Consumed by the gate workflow: caller-lint emits this list; the matrixed
+# build and image-scan jobs fromJSON() it. Entry schema:
+#   {name, role: "primary"|"extra", image, dockerfile, context, target,
+#    build_args, cache_scope}
+# build_args excludes BUILDER_IMAGE/RUNTIME_IMAGE — the build job prepends
+# those from the hardened-registry-login step per leg. The list always has
+# >=1 entry (the primary), so the jobs' matrices can never be empty.
+
+_PRIMARY_CACHE_SCOPE = "security-scan-backend"
+
+
+def normalized_containers(
+    scan_image: str,
+    dockerfile: str,
+    context: str,
+    target: str,
+    app_path: str,
+    app_package: str,
+    app_module: str,
+    app_port: str,
+    runtime_apks: str,
+    extra_build_args: str,
+    extra_containers: str,
+) -> list[dict[str, str]]:
+    """Return the normalized container list: primary first, then extras.
+
+    Fails closed (SystemExit) on unparseable extra_containers — the lint
+    rules have already validated caller-literal values by the time the gate
+    job calls this with resolved inputs.
+    """
+    primary_args = "\n".join(
+        [
+            f"APP_PATH={app_path}",
+            f"APP_PACKAGE={app_package}",
+            f"APP_MODULE={app_module}",
+            f"APP_PORT={app_port}",
+            f"RUNTIME_APKS={runtime_apks}",
+        ]
+    )
+    if extra_build_args.strip():
+        primary_args += "\n" + extra_build_args
+    containers: list[dict[str, str]] = [
+        {
+            "name": "primary",
+            "role": "primary",
+            "image": scan_image,
+            "dockerfile": dockerfile,
+            "context": context or ".",
+            "target": target,
+            "build_args": primary_args,
+            "cache_scope": _PRIMARY_CACHE_SCOPE,
+        }
+    ]
+    raw = extra_containers.strip()
+    if raw in ("", "[]"):
+        return containers
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: extra_containers is not valid JSON: {e}") from e
+    if not isinstance(entries, list):
+        raise SystemExit("error: extra_containers must be a JSON array")
+    for idx, entry in enumerate(entries):
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise SystemExit(f"error: extra_containers entry {idx} missing name")
+        name = entry["name"]
+        containers.append(
+            {
+                "name": name,
+                "role": "extra",
+                "image": str(entry.get("image") or f"{name}:local"),
+                "dockerfile": str(entry.get("dockerfile") or ""),
+                "context": str(entry.get("context") or "."),
+                "target": str(entry.get("target") or ""),
+                "build_args": str(entry.get("build_args") or ""),
+                "cache_scope": f"security-scan-{name}",
+            }
+        )
+    return containers
+
+
+def emit_containers() -> int:
+    """Print the normalized containers matrix (single-line JSON) from env."""
+    env = os.environ.get
+    containers = normalized_containers(
+        scan_image=env("GATE_SCAN_IMAGE", ""),
+        dockerfile=env("GATE_DOCKERFILE", ""),
+        context=env("GATE_CONTEXT", "."),
+        target=env("GATE_TARGET", ""),
+        app_path=env("GATE_APP_PATH", ""),
+        app_package=env("GATE_APP_PACKAGE", ""),
+        app_module=env("GATE_APP_MODULE", ""),
+        app_port=env("GATE_APP_PORT", ""),
+        runtime_apks=env("GATE_RUNTIME_APKS", ""),
+        extra_build_args=env("GATE_EXTRA_BUILD_ARGS", ""),
+        extra_containers=env("GATE_EXTRA_CONTAINERS", ""),
+    )
+    print(json.dumps(containers, separators=(",", ":")))
+    return 0
+
+
 def lint(
     caller_path: Path, props: dict[str, Any], consumer_root: Path | None
 ) -> list[str]:
@@ -457,6 +566,8 @@ def lint(
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["--emit-containers"]:
+        return emit_containers()
     parser = argparse.ArgumentParser(
         description="Lint a caller workflow against the gate contract."
     )

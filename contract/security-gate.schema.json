@@ -3,29 +3,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "app_module": {
-      "default": "app.main:app",
-      "description": "ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object.",
-      "type": "string"
-    },
-    "app_package": {
-      "default": "app-backend",
-      "description": "Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata.",
-      "type": "string"
-    },
-    "app_path": {
-      "default": "apps/app/backend",
-      "description": "Consumer repo path to the backend app directory, passed as the Dockerfile's APP_PATH build ARG.",
-      "type": "string"
-    },
-    "app_port": {
-      "default": "8000",
-      "description": "Container port the backend listens on, passed as the Dockerfile's APP_PORT build ARG; must match the consumer chart's backend service/probe port.",
-      "type": "string"
-    },
     "builder_image": {
       "default": "cgr.dev/chainguard/python:latest-dev",
-      "description": "Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile.",
+      "description": "Build-stage base image, exported to `make ci-build` as CI_BUILDER_BASE (after hardened-registry failover resolution); consume it as your builder base-image build arg.",
       "type": "string"
     },
     "cluster_name": {
@@ -33,54 +13,9 @@
       "description": "kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart.",
       "type": "string"
     },
-    "context": {
-      "default": ".",
-      "description": "Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend).",
-      "type": "string"
-    },
     "contract_file": {
       "default": "Makefile.ci",
-      "description": "Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. Only read when use_ci_contract is true. Start from templates/consumer/Makefile.ci.",
-      "type": "string"
-    },
-    "dockerfile": {
-      "default": "containers/backend/Dockerfile",
-      "description": "Path to the backend Dockerfile in the consumer repo.",
-      "type": "string"
-    },
-    "extra_build_args": {
-      "default": "",
-      "description": "Newline-separated KEY=VALUE pairs appended to the Docker build-args \u2014 for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. PYTHON_DEV/PYTHON_RUN/NODE_DEV).",
-      "type": "string"
-    },
-    "extra_containers": {
-      "default": "",
-      "description": "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable \u2014 one object per entry: name, dockerfile, context (default '.'), image (default <name>:local; must match values-local tags the chart schedules with pullPolicy Never), target (optional stage name), build_args (newline-joined KEY=VALUE string). When set, cluster-smoke waits for build-extra and kind-loads each built tag before helm install. Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra.",
-      "type": "string"
-    },
-    "health_path": {
-      "default": "/health",
-      "description": "HTTP path the cluster-smoke step probes on the booted primary workload (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Probes the primary only; built extra_containers images are kind-loaded so multi-image charts can install, but extras are not health-probed.",
-      "type": "string"
-    },
-    "helm_chart_path": {
-      "default": "helm/app",
-      "description": "Path to the consumer's helm chart directory \u2014 the helm lint/template target and the cluster-smoke install source.",
-      "type": "string"
-    },
-    "helm_release_name": {
-      "default": "app-ci",
-      "description": "Helm release name for template and the cluster-smoke install; operator choice, no consumer-file counterpart.",
-      "type": "string"
-    },
-    "helm_values_file": {
-      "default": "helm/app/values.yaml",
-      "description": "Path to the consumer chart's base values file, used by helm lint and template.",
-      "type": "string"
-    },
-    "helm_values_local_file": {
-      "default": "helm/app/values-local.yaml",
-      "description": "Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install. Parsed YAML must pin the backend image to scan_image (string image or repository+tag); comments do not count. Use pullPolicy: Never for cluster-smoke.",
+      "description": "Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. `make ci-manifest` output is the single source of truth for the containers list and chart/health metadata. Start from templates/consumer/Makefile.ci.",
       "type": "string"
     },
     "image_only": {
@@ -103,60 +38,25 @@
       "description": "Optional Iron Bank replacement for runtime_image \u2014 applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set.",
       "type": "string"
     },
-    "namespace": {
-      "default": "app-ci",
-      "description": "Kubernetes namespace cluster-smoke deploys the release into; operator choice, no consumer-file counterpart.",
-      "type": "string"
-    },
     "require_hardened_bases": {
       "default": true,
-      "description": "Hardened-base policy \u2014 operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch \u2014 the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan \u2014 a green result is not proof the approved production image is clean.",
+      "description": "Hardened-base policy \u2014 operator posture decision, not read from a consumer file. true (default): fail the build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch \u2014 the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan \u2014 a green result is not proof the approved production image is clean.",
       "type": "boolean"
-    },
-    "runtime_apks": {
-      "default": "",
-      "description": "Extra runtime packages, passed as the Dockerfile's RUNTIME_APKS build ARG; set only when the consumer Dockerfile's runtime stage installs apks.",
-      "type": "string"
     },
     "runtime_image": {
       "default": "cgr.dev/chainguard/python:latest",
-      "description": "Runtime-stage base image, passed as the Dockerfile's RUNTIME_IMAGE build ARG; must match the runtime base ARG in the consumer's Dockerfile.",
+      "description": "Runtime-stage base image, exported to `make ci-build` as CI_RUNTIME_BASE (after hardened-registry failover resolution); consume it as your runtime base-image build arg.",
       "type": "string"
     },
     "scan_image": {
       "default": "app:local",
-      "description": "Local-daemon tag the image is built and scanned under; caller-lint requires it to equal a parsed values-local image string or repository:tag join (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never.",
-      "type": "string"
-    },
-    "secctx_make_target": {
-      "default": "security-helm-secctx",
-      "description": "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path \u2014 do not assume the caller preinstalled uv.",
-      "type": "string"
-    },
-    "service_port": {
-      "default": "8000",
-      "description": "Port the primary backend Kubernetes Service exposes \u2014 used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior).",
+      "description": "Local-daemon tag the primary image is built and scanned under; caller-lint requires it to equal a parsed image string or repository:tag join in the manifest's values_local file (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never. Passed to `make ci-build` as CI_IMAGE_TAG for the primary.",
       "type": "string"
     },
     "smoke_secrets": {
       "default": "",
-      "description": "JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install \u2014 one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string, same shape as extra_containers.build_args). Use for chart envFrom/secretKeyRef pre-reqs (e.g. DATABASE_URL). Values are CI fixtures only \u2014 never commit real credentials. Default \"\" creates none beyond the built-in app-database-url Postgres helper. Prefer a multiline YAML '|' block.",
+      "description": "JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install \u2014 one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string). Use for chart envFrom/secretKeyRef pre-reqs beyond what your `make ci-smoke-env` target provisions. Values are CI fixtures only \u2014 never commit real credentials. Default \"\" creates none. Prefer a multiline YAML '|' block.",
       "type": "string"
-    },
-    "smoke_workload_match": {
-      "default": "backend",
-      "description": "Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts).",
-      "type": "string"
-    },
-    "target": {
-      "default": "",
-      "description": "Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage \u2014 set explicitly when a trailing dev/debug/test stage would otherwise win.",
-      "type": "string"
-    },
-    "use_ci_contract": {
-      "default": false,
-      "description": "Consumer build contract flag. false (default): the gate owns build knowledge \u2014 images build from the dockerfile/context/target/APP_* inputs, secctx uses secctx_make_target, and cluster-smoke provisions its inline Postgres/secret/CRD scaffold (current behavior, unchanged). true: the consumer repo owns build knowledge via contract_file \u2014 the containers list comes from `make ci-manifest` (extra_containers is ignored; manifest images[0] is the primary, images[1:] are the extras), each image builds via `make ci-build IMAGE=<name>` with CI_BUILDER_BASE/CI_RUNTIME_BASE/CI_IMAGE_TAG env, secctx runs `make ci-secctx`, and cluster-smoke provisions via `make ci-smoke-env NAMESPACE=<ns>`. The gate's bundled restricted-PSS assertion runs in-gate on BOTH paths \u2014 it is gate policy and cannot be delegated. See docs/CI-CONTRACT.md.",
-      "type": "boolean"
     }
   },
   "title": "Security gate request contract (workflow_call inputs)",

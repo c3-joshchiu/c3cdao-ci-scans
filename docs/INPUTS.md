@@ -6,6 +6,12 @@ table below is generated from `workflow_call.inputs` by
 hand-edit between the markers; CI rejects drift. Edit the preamble and worked
 examples above the markers freely; the generator preserves them.
 
+Since v0.5.0 the consumer build contract is the **only** build path: build
+knowledge (Dockerfiles, contexts, build args, chart location, health probe)
+lives in your contract makefile (`contract_file`, default `Makefile.ci`), not
+in `with:` inputs — see [CI-CONTRACT.md](CI-CONTRACT.md). The inputs that
+remain are orchestration and policy knobs.
+
 ## Worked examples
 
 The examples pass the four gate secrets explicitly because `secrets: inherit`
@@ -14,19 +20,16 @@ owners) and caller-lint rejects it (`no-secrets-inherit`).
 
 ### Single-image default
 
-The common case: one backend image built from one Dockerfile. Omit anything you
-keep at its default.
+The common case: one backend image, one chart, everything declared by
+`make ci-manifest`. Omit anything you keep at its default.
 
 ```yaml
 jobs:
   security-scan:
-    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.1.0
+    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.5.0
     with:
       scan_image: app:local
-      dockerfile: containers/backend/Dockerfile
-      app_path: apps/app/backend
-      app_package: app-backend
-      app_module: app.main:app
+      contract_file: Makefile.ci
     secrets:
       CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
       CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
@@ -34,75 +37,35 @@ jobs:
       IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
 ```
 
-### Multi-container (`extra_containers`)
+### Multi-container
 
-Build and image-scan a worker or sidecar alongside the primary deployable.
-`extra_containers` is a JSON array passed as a string; one object per extra
-image. Cluster-smoke **kind-loads** each built extra tag before helm install
-(so charts that schedule them with `pullPolicy: Never` do not hit
-`ErrImageNeverPull`). Set each entry's `image` to match the chart's
-values-local tag. The HTTP health probe still targets the primary workload
-only.
+Extras (workers, frontends, sidecars) are declared in the manifest, not the
+caller: add entries to `ci-manifest`'s `images[]` (images[0] stays the
+primary) and teach `ci-build IMAGE=<name>` to build each one. Cluster-smoke
+kind-loads every built extras tag before `helm install`, so charts that
+schedule them with `pullPolicy: Never` do not hit `ErrImageNeverPull` — set
+each entry's `image` key to match the chart's values-local tag.
 
-Point `extra_containers` at **self-authored, gate-reachable** images (your
-frontend/worker/sidecar Dockerfiles whose bases pull from `cgr.dev` and/or
-`registry1.dso.mil`). Do not use it to "scan" third-party DB/base images or
-private-mirror artifacts the runner cannot pull — those produce low-signal
-proxy scans, not approved-image attestation.
-
-**Format:** use a multiline YAML `|` block so each object is readable and
-diffable. Do not pack the array onto one quoted line — that form parses, but
-it does not scale past one extra image and is hard to review. Caller-lint
-emits a style notice (`extra-containers-format`) when it sees one-line packing.
-
-```yaml
-jobs:
-  security-scan:
-    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.1.0
-    with:
-      scan_image: app:local
-      dockerfile: containers/backend/Dockerfile
-      extra_containers: |
-        [
-          {
-            "name": "worker",
-            "dockerfile": "containers/worker/Dockerfile",
-            "context": ".",
-            "image": "worker:local",
-            "build_args": "APP_PATH=apps/app/worker\nAPP_PACKAGE=app-worker"
-          },
-          {
-            "name": "frontend",
-            "dockerfile": "apps/frontend/Dockerfile",
-            "context": "apps/frontend",
-            "image": "frontend:local"
-          }
-        ]
-    secrets:
-      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
-      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
-      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
-      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
-```
+Declare **self-authored, gate-reachable** images only (bases pulled from
+`cgr.dev` and/or `registry1.dso.mil`). Do not use extras to "scan" third-party
+DB/base images or private-mirror artifacts the runner cannot pull — those
+produce low-signal proxy scans, not approved-image attestation.
 
 ### Smoke Secrets (`smoke_secrets`)
 
 Charts that reference Kubernetes Secrets via `envFrom` / `secretKeyRef` need
-those objects present before `helm install`. Pass CI fixture literals (never
-real credentials) as a JSON array — same multiline `|` style as
-`extra_containers`. Each object has `name` (Secret metadata.name) and
-`literals` (newline-joined `KEY=VALUE`, same shape as `build_args`).
-
-Cluster-smoke still creates a default `app-database-url` Postgres helper; use
-`smoke_secrets` when your chart expects a different name or additional keys.
+those objects present before `helm install`. Your `make ci-smoke-env` target
+is the first place for these; `smoke_secrets` covers caller-side extras. Pass
+CI fixture literals (never real credentials) as a JSON array in a multiline
+`|` block. Each object has `name` (Secret metadata.name) and `literals`
+(newline-joined `KEY=VALUE`).
 
 ```yaml
 jobs:
   security-scan:
-    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.1.0
+    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.5.0
     with:
       scan_image: app:local
-      dockerfile: containers/backend/Dockerfile
       smoke_secrets: |
         [
           {
@@ -117,28 +80,12 @@ jobs:
       IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
 ```
 
-### Non-8000 `service_port` / `health_path`
+### Non-default ports and health routes
 
-When the backend listens on a non-default port and exposes a non-`/health`
-liveness route, set `app_port`, `service_port`, and `health_path` to match the
-consumer chart and app.
-
-```yaml
-jobs:
-  security-scan:
-    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.1.0
-    with:
-      scan_image: app:local
-      dockerfile: containers/backend/Dockerfile
-      app_port: "9090"
-      service_port: "80"
-      health_path: /api/health
-    secrets:
-      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
-      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
-      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
-      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
-```
+Ports and health probes are manifest data, not inputs: set `health.port` /
+`health.path` / `health.workload_match` in your `ci-manifest` output (the
+reference `Makefile.ci` exposes them as `APP_PORT` / `HEALTH_PATH` /
+`WORKLOAD_MATCH` variables).
 
 ## Scan boundary
 
@@ -157,35 +104,15 @@ production image is clean; the job labels that run as a **proxy scan**.
 <!-- BEGIN GENERATED: security-gate-inputs -->
 | Input | Type | Default | Where the value comes from |
 | --- | --- | --- | --- |
-| `scan_image` | string | `app:local` | Local-daemon tag the image is built and scanned under; caller-lint requires it to equal a parsed values-local image string or repository:tag join (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never. |
-| `dockerfile` | string | `containers/backend/Dockerfile` | Path to the backend Dockerfile in the consumer repo. |
-| `context` | string | `.` | Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend). |
-| `target` | string | `""` | Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage — set explicitly when a trailing dev/debug/test stage would otherwise win. |
-| `builder_image` | string | `cgr.dev/chainguard/python:latest-dev` | Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile. |
-| `runtime_image` | string | `cgr.dev/chainguard/python:latest` | Runtime-stage base image, passed as the Dockerfile's RUNTIME_IMAGE build ARG; must match the runtime base ARG in the consumer's Dockerfile. |
-| `runtime_apks` | string | `""` | Extra runtime packages, passed as the Dockerfile's RUNTIME_APKS build ARG; set only when the consumer Dockerfile's runtime stage installs apks. |
-| `extra_build_args` | string | `""` | Newline-separated KEY=VALUE pairs appended to the Docker build-args — for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. PYTHON_DEV/PYTHON_RUN/NODE_DEV). |
-| `require_hardened_bases` | boolean | `true` | Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan — a green result is not proof the approved production image is clean. |
+| `scan_image` | string | `app:local` | Local-daemon tag the primary image is built and scanned under; caller-lint requires it to equal a parsed image string or repository:tag join in the manifest's values_local file (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never. Passed to `make ci-build` as CI_IMAGE_TAG for the primary. |
+| `contract_file` | string | `Makefile.ci` | Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. `make ci-manifest` output is the single source of truth for the containers list and chart/health metadata. Start from templates/consumer/Makefile.ci. |
+| `builder_image` | string | `cgr.dev/chainguard/python:latest-dev` | Build-stage base image, exported to `make ci-build` as CI_BUILDER_BASE (after hardened-registry failover resolution); consume it as your builder base-image build arg. |
+| `runtime_image` | string | `cgr.dev/chainguard/python:latest` | Runtime-stage base image, exported to `make ci-build` as CI_RUNTIME_BASE (after hardened-registry failover resolution); consume it as your runtime base-image build arg. |
+| `require_hardened_bases` | boolean | `true` | Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail the build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan — a green result is not proof the approved production image is clean. |
 | `ironbank_registry` | string | `registry1.dso.mil` | Iron Bank registry host used for docker login whenever IRONBANK_* secrets are set (alongside Chainguard when both are configured). Also used when primary-base failover swaps to ironbank_* images (CGR absent, Iron Bank present). Operator decision; defaults to the DoD registry. |
 | `ironbank_builder_image` | string | `""` | Optional Iron Bank replacement for builder_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's builder_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set. |
 | `ironbank_runtime_image` | string | `""` | Optional Iron Bank replacement for runtime_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set. |
-| `helm_chart_path` | string | `helm/app` | Path to the consumer's helm chart directory — the helm lint/template target and the cluster-smoke install source. |
-| `helm_values_file` | string | `helm/app/values.yaml` | Path to the consumer chart's base values file, used by helm lint and template. |
-| `helm_values_local_file` | string | `helm/app/values-local.yaml` | Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install. Parsed YAML must pin the backend image to scan_image (string image or repository+tag); comments do not count. Use pullPolicy: Never for cluster-smoke. |
-| `helm_release_name` | string | `app-ci` | Helm release name for template and the cluster-smoke install; operator choice, no consumer-file counterpart. |
 | `cluster_name` | string | `app-ci` | kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart. |
-| `namespace` | string | `app-ci` | Kubernetes namespace cluster-smoke deploys the release into; operator choice, no consumer-file counterpart. |
-| `secctx_make_target` | string | `security-helm-secctx` | Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path — do not assume the caller preinstalled uv. |
-| `app_path` | string | `apps/app/backend` | Consumer repo path to the backend app directory, passed as the Dockerfile's APP_PATH build ARG. |
-| `app_package` | string | `app-backend` | Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata. |
-| `app_module` | string | `app.main:app` | ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object. |
-| `app_port` | string | `8000` | Container port the backend listens on, passed as the Dockerfile's APP_PORT build ARG; must match the consumer chart's backend service/probe port. |
-| `health_path` | string | `/health` | HTTP path the cluster-smoke step probes on the booted primary workload (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Probes the primary only; built extra_containers images are kind-loaded so multi-image charts can install, but extras are not health-probed. |
-| `service_port` | string | `8000` | Port the primary backend Kubernetes Service exposes — used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior). |
-| `smoke_workload_match` | string | `backend` | Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts). |
-| `extra_containers` | string | `""` | JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local; must match values-local tags the chart schedules with pullPolicy Never), target (optional stage name), build_args (newline-joined KEY=VALUE string). When set, cluster-smoke waits for build-extra and kind-loads each built tag before helm install. Prefer a multiline YAML '\|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default "" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra. |
-| `smoke_secrets` | string | `""` | JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install — one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string, same shape as extra_containers.build_args). Use for chart envFrom/secretKeyRef pre-reqs (e.g. DATABASE_URL). Values are CI fixtures only — never commit real credentials. Default "" creates none beyond the built-in app-database-url Postgres helper. Prefer a multiline YAML '\|' block. |
+| `smoke_secrets` | string | `""` | JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install — one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string). Use for chart envFrom/secretKeyRef pre-reqs beyond what your `make ci-smoke-env` target provisions. Values are CI fixtures only — never commit real credentials. Default "" creates none. Prefer a multiline YAML '\|' block. |
 | `image_only` | boolean | `false` | When true, skip helm-check and cluster-smoke (and omit them from the Security Gate blocking set) — for infra/image-only repos that build and vuln-scan images without a deployable app chart. Default false keeps app callers unchanged (helm + smoke still blocking). |
-| `use_ci_contract` | boolean | `false` | Consumer build contract flag. false (default): the gate owns build knowledge — images build from the dockerfile/context/target/APP_* inputs, secctx uses secctx_make_target, and cluster-smoke provisions its inline Postgres/secret/CRD scaffold (current behavior, unchanged). true: the consumer repo owns build knowledge via contract_file — the containers list comes from `make ci-manifest` (extra_containers is ignored; manifest images[0] is the primary, images[1:] are the extras), each image builds via `make ci-build IMAGE=<name>` with CI_BUILDER_BASE/CI_RUNTIME_BASE/CI_IMAGE_TAG env, secctx runs `make ci-secctx`, and cluster-smoke provisions via `make ci-smoke-env NAMESPACE=<ns>`. The gate's bundled restricted-PSS assertion runs in-gate on BOTH paths — it is gate policy and cannot be delegated. See docs/CI-CONTRACT.md. |
-| `contract_file` | string | `Makefile.ci` | Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. Only read when use_ci_contract is true. Start from templates/consumer/Makefile.ci. |
 <!-- END GENERATED: security-gate-inputs -->

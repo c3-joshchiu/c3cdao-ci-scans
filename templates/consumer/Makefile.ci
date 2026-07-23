@@ -1,9 +1,9 @@
 # Consumer CI build contract — copied from c3cdao-ci-scans; you own this file.
 #
-# The security gate calls these four targets when the caller sets
-# `use_ci_contract: true` (see docs/CI-CONTRACT.md in c3cdao-ci-scans).
-# This reference implementation reproduces the gate's default (legacy-path)
-# behavior; edit each target for your repo. Interface (stable):
+# The security gate calls these four targets on every run — the contract is
+# the only build path (see docs/CI-CONTRACT.md in c3cdao-ci-scans). This
+# reference implementation is a working single-image baseline; edit each
+# target for your repo. Interface (stable):
 #
 #   ci-manifest                 print the build manifest JSON to stdout
 #   ci-build IMAGE=<name>       build the named manifest image
@@ -108,14 +108,14 @@ ci-build:
 	  --tag "$(CI_IMAGE_TAG)" \
 	  "$(BUILD_CONTEXT)"
 
-# Your pod-security-context assertion (legacy input: secctx_make_target,
-# default security-helm-secctx). Delegate to your existing target, or inline
-# your own check. The gate's bundled restricted-PSS assertion still runs
-# in-gate on both paths — this target is your additional/own coverage.
+# Your pod-security-context assertion. Delegate to your existing target, or
+# inline your own check. The gate's bundled restricted-PSS assertion always
+# runs in-gate regardless — this target is your additional/own coverage
+# (ci-secctx is the one optional target; its absence is a lint notice).
 ci-secctx:
 	$(MAKE) security-helm-secctx
 
-# Provision the smoke prerequisites the gate used to scaffold inline:
+# Provision the smoke prerequisites:
 # ephemeral pgvector Postgres + Service, the app-database-url secret, and the
 # Gateway API CRDs (server-side: they exceed the client-side annotation
 # limit). Values are CI fixtures only — never real credentials. The gate has

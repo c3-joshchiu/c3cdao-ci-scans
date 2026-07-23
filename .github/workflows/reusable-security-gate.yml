@@ -3,28 +3,39 @@
 # A single workflow owns the entire PR gate and reports as the required
 # status check, instead of several independent modular scan workflows.
 #
+# Interface (v0.5.0): the consumer build contract is the ONLY build path.
+# The consumer repo owns its build knowledge via a contract makefile
+# (contract_file, default Makefile.ci) exposing four targets:
+#   ci-manifest / ci-build / ci-secctx / ci-smoke-env
+# `make ci-manifest` is the single source of truth for the containers list
+# and the chart/health metadata; see docs/CI-CONTRACT.md.
+#
 # Structure:
 #   caller-lint       configuration pre-flight: lint the consumer caller against
-#                     the published contract, then (when require_hardened_bases)
-#                     fail closed if neither CGR nor Iron Bank pull secrets are
-#                     present. Also emits the normalized containers matrix
-#                     (primary + extras) that build/image-scan matrix over.
+#                     the published contract — including blocking validation of
+#                     the consumer contract makefile — then (when
+#                     require_hardened_bases) fail closed if neither CGR nor
+#                     Iron Bank pull secrets are present. Also emits the
+#                     normalized containers matrix (primary + extras) and the
+#                     manifest's chart/health sections as job outputs.
 #                     Every scan job needs it.
 #   secrets-scan      TruffleHog (parallel after caller-lint)
 #   sast-semgrep      Semgrep (parallel, warn-only until baseline)
 #   sast-sonarqube    SonarQube ephemeral (parallel, warn-only until baseline)
-#   helm-check        helm lint + template + restricted PSS (after caller-lint;
-#                     blocking unless image_only)
+#   helm-check        helm lint + template + restricted PSS on the manifest's
+#                     chart, plus the consumer's own `make ci-secctx` (after
+#                     caller-lint; blocking unless image_only)
 #   build             matrixed over the normalized containers list (primary +
-#                     extras): builds each image once, generates its image SBOM,
-#                     and hands it to downstream jobs as a transient
-#                     `docker save` tarball uploaded via actions/upload-artifact.
+#                     extras): builds each image via `make ci-build
+#                     IMAGE=<name>`, generates its image SBOM, and hands it to
+#                     downstream jobs as a transient `docker save` tarball
+#                     uploaded via actions/upload-artifact.
 #                     needs: caller-lint + helm-check (skips docker when PSS/helm
 #                     already failed; when image_only, helm-check is skipped and
 #                     builds proceed after caller-lint alone)
-#   cluster-smoke     kind + helm install + GET /health against the built image
-#                     (needs: build) — proves the image actually boots;
-#                     skipped when image_only
+#   cluster-smoke     kind + `make ci-smoke-env` + helm install + health probe
+#                     against the built image (needs: build) — proves the image
+#                     actually boots; skipped when image_only
 #   image-scan        matrixed over the same containers list: Trivy + Grype on
 #                     each built image (+ its image SBOM); the primary leg also
 #                     generates and scans the whole-repo source SBOM.
@@ -54,39 +65,23 @@ on:
   workflow_call:
     inputs:
       scan_image:
-        description: "Local-daemon tag the image is built and scanned under; caller-lint requires it to equal a parsed values-local image string or repository:tag join (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never."
+        description: "Local-daemon tag the primary image is built and scanned under; caller-lint requires it to equal a parsed image string or repository:tag join in the manifest's values_local file (comments ignored). Cluster-smoke kind-loads this tag with pullPolicy: Never. Passed to `make ci-build` as CI_IMAGE_TAG for the primary."
         type: string
         default: app:local
-      dockerfile:
-        description: "Path to the backend Dockerfile in the consumer repo."
+      contract_file:
+        description: "Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. `make ci-manifest` output is the single source of truth for the containers list and chart/health metadata. Start from templates/consumer/Makefile.ci."
         type: string
-        default: containers/backend/Dockerfile
-      context:
-        description: "Docker build context directory for the primary image; default '.' (repo root). Set to a subdirectory when the Dockerfile expects COPY from that tree (e.g. apps/foo/backend)."
-        type: string
-        default: .
-      target:
-        description: "Docker build stage name for the primary image (build-push-action target). Empty (default) builds the last stage — set explicitly when a trailing dev/debug/test stage would otherwise win."
-        type: string
-        default: ""
+        default: Makefile.ci
       builder_image:
-        description: "Build-stage base image, passed as the Dockerfile's BUILDER_IMAGE build ARG; must match the builder base ARG in the consumer's Dockerfile."
+        description: "Build-stage base image, exported to `make ci-build` as CI_BUILDER_BASE (after hardened-registry failover resolution); consume it as your builder base-image build arg."
         type: string
         default: cgr.dev/chainguard/python:latest-dev
       runtime_image:
-        description: "Runtime-stage base image, passed as the Dockerfile's RUNTIME_IMAGE build ARG; must match the runtime base ARG in the consumer's Dockerfile."
+        description: "Runtime-stage base image, exported to `make ci-build` as CI_RUNTIME_BASE (after hardened-registry failover resolution); consume it as your runtime base-image build arg."
         type: string
         default: cgr.dev/chainguard/python:latest
-      runtime_apks:
-        description: "Extra runtime packages, passed as the Dockerfile's RUNTIME_APKS build ARG; set only when the consumer Dockerfile's runtime stage installs apks."
-        type: string
-        default: ""
-      extra_build_args:
-        description: "Newline-separated KEY=VALUE pairs appended to the Docker build-args — for consumer Dockerfiles whose base-image args aren't BUILDER_IMAGE/RUNTIME_IMAGE (e.g. PYTHON_DEV/PYTHON_RUN/NODE_DEV)."
-        type: string
-        default: ""
       require_hardened_bases:
-        description: "Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail phase1-build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan — a green result is not proof the approved production image is clean."
+        description: "Hardened-base policy — operator posture decision, not read from a consumer file. true (default): fail the build when neither Chainguard nor Iron Bank credentials are configured. false: warn and build with the consumer-specified bases (pilot escape hatch — the consumer explicitly owns that posture). When false, Vulnerability Scan labels the run as a public-base / consumer-specified-base proxy scan — a green result is not proof the approved production image is clean."
         type: boolean
         default: true
       ironbank_registry:
@@ -101,82 +96,18 @@ on:
         description: "Optional Iron Bank replacement for runtime_image — applied only on primary-base failover (CGR credentials absent AND Iron Bank present). Left empty, the consumer's runtime_image passes through. Does not affect whether Iron Bank login runs; login is independent when IRONBANK_* is set."
         type: string
         default: ""
-      helm_chart_path:
-        description: "Path to the consumer's helm chart directory — the helm lint/template target and the cluster-smoke install source."
-        type: string
-        default: helm/app
-      helm_values_file:
-        description: "Path to the consumer chart's base values file, used by helm lint and template."
-        type: string
-        default: helm/app/values.yaml
-      helm_values_local_file:
-        description: "Path to the consumer chart's local-overrides values file, layered onto the cluster-smoke helm install. Parsed YAML must pin the backend image to scan_image (string image or repository+tag); comments do not count. Use pullPolicy: Never for cluster-smoke."
-        type: string
-        default: helm/app/values-local.yaml
-      helm_release_name:
-        description: "Helm release name for template and the cluster-smoke install; operator choice, no consumer-file counterpart."
-        type: string
-        default: app-ci
       cluster_name:
         description: "kind cluster name cluster-smoke creates and loads the image into; operator choice, no consumer-file counterpart."
         type: string
         default: app-ci
-      namespace:
-        description: "Kubernetes namespace cluster-smoke deploys the release into; operator choice, no consumer-file counterpart."
-        type: string
-        default: app-ci
-      secctx_make_target:
-        description: "Name of the consumer Makefile target that asserts pod security contexts; skipped with a notice when the consumer Makefile lacks it. helm-check installs runner uv before the make or bundled path — do not assume the caller preinstalled uv."
-        type: string
-        default: security-helm-secctx
-      app_path:
-        description: "Consumer repo path to the backend app directory, passed as the Dockerfile's APP_PATH build ARG."
-        type: string
-        default: apps/app/backend
-      app_package:
-        description: "Backend package dist name, passed as the Dockerfile's APP_PACKAGE build ARG; must match the consumer backend's package metadata."
-        type: string
-        default: app-backend
-      app_module:
-        description: "ASGI entrypoint as module:attr, passed as the Dockerfile's APP_MODULE build ARG; must match the consumer backend's app object."
-        type: string
-        default: app.main:app
-      app_port:
-        description: "Container port the backend listens on, passed as the Dockerfile's APP_PORT build ARG; must match the consumer chart's backend service/probe port."
-        type: string
-        default: "8000"
-      health_path:
-        description: "HTTP path the cluster-smoke step probes on the booted primary workload (GET must return 200). Set to the app's health/liveness route, e.g. /health, /healthz, /api/health. Probes the primary only; built extra_containers images are kind-loaded so multi-image charts can install, but extras are not health-probed."
-        type: string
-        default: /health
-      service_port:
-        description: "Port the primary backend Kubernetes Service exposes — used as the cluster-smoke `kubectl port-forward` remote port. This is the Service's .spec.ports[].port, which need not equal app_port; defaults to 8000 (today's behavior)."
-        type: string
-        default: "8000"
-      smoke_workload_match:
-        description: "Case-insensitive substring identifying the backend Deployment/Service in cluster-smoke (matched against `kubectl get deploy/svc -o name`). Default 'backend'; set to the workload token for charts whose deployment name contains no 'backend' (e.g. agent-template charts)."
-        type: string
-        default: backend
-      extra_containers:
-        description: "JSON array (as a string) of additional containers to build and image-scan beyond the primary deployable — one object per entry: name, dockerfile, context (default '.'), image (default <name>:local; must match values-local tags the chart schedules with pullPolicy Never), target (optional stage name), build_args (newline-joined KEY=VALUE string). When set, cluster-smoke waits for build-extra and kind-loads each built tag before helm install. Prefer a multiline YAML '|' block (readable, one object per entry); do not pack the array onto a single quoted line. Default \"\" means no extras. Caller lint validates structure and notices one-line packing; context/image defaults apply in build-extra."
-        type: string
-        default: ""
       smoke_secrets:
-        description: "JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install — one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string, same shape as extra_containers.build_args). Use for chart envFrom/secretKeyRef pre-reqs (e.g. DATABASE_URL). Values are CI fixtures only — never commit real credentials. Default \"\" creates none beyond the built-in app-database-url Postgres helper. Prefer a multiline YAML '|' block."
+        description: "JSON array (as a string) of Kubernetes Secrets to create in the smoke namespace before helm install — one object per entry: name (DNS-1123 secret name), literals (newline-joined KEY=VALUE string). Use for chart envFrom/secretKeyRef pre-reqs beyond what your `make ci-smoke-env` target provisions. Values are CI fixtures only — never commit real credentials. Default \"\" creates none. Prefer a multiline YAML '|' block."
         type: string
         default: ""
       image_only:
         description: "When true, skip helm-check and cluster-smoke (and omit them from the Security Gate blocking set) — for infra/image-only repos that build and vuln-scan images without a deployable app chart. Default false keeps app callers unchanged (helm + smoke still blocking)."
         type: boolean
         default: false
-      use_ci_contract:
-        description: "Consumer build contract flag. false (default): the gate owns build knowledge — images build from the dockerfile/context/target/APP_* inputs, secctx uses secctx_make_target, and cluster-smoke provisions its inline Postgres/secret/CRD scaffold (current behavior, unchanged). true: the consumer repo owns build knowledge via contract_file — the containers list comes from `make ci-manifest` (extra_containers is ignored; manifest images[0] is the primary, images[1:] are the extras), each image builds via `make ci-build IMAGE=<name>` with CI_BUILDER_BASE/CI_RUNTIME_BASE/CI_IMAGE_TAG env, secctx runs `make ci-secctx`, and cluster-smoke provisions via `make ci-smoke-env NAMESPACE=<ns>`. The gate's bundled restricted-PSS assertion runs in-gate on BOTH paths — it is gate policy and cannot be delegated. See docs/CI-CONTRACT.md."
-        type: boolean
-        default: false
-      contract_file:
-        description: "Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. Only read when use_ci_contract is true. Start from templates/consumer/Makefile.ci."
-        type: string
-        default: Makefile.ci
     secrets:
       CGR_PULL_TOKEN:
         required: false
@@ -199,30 +130,26 @@ env:
   # Local-daemon tag only — the image is never pushed to a registry. It moves
   # between jobs as a `docker save` tarball (actions artifact), so a bare repo
   # tag is all we need; `docker load` restores this exact tag downstream.
-  # MUST match inputs.scan_image to the consumer's helm values-local (backend
+  # MUST match inputs.scan_image to the manifest's values_local file (backend
   # image + pullPolicy: Never) — cluster-smoke `kind load`s this tag and the
   # chart's backend + migration-hook pods reference it with pullPolicy Never.
   # A mismatch = ErrImageNeverPull and the post-install migration hook hangs
   # until helm times out.
   SCAN_IMAGE: ${{ inputs.scan_image }}
   IMAGE_ARTIFACT: scan-image
-  # Base-image args for the backend build. Override builder_image/
-  # runtime_image/runtime_apks per consumer if it needs a private Chainguard
-  # org or extra runtime packages. The hardened-base login step authenticates
-  # Chainguard (CGR_PULL_*) and Iron Bank (IRONBANK_*) independently when each
-  # is set (both sessions can be active). Primary builder/runtime swap to
-  # ironbank_* images only when CGR is absent and Iron Bank is present; with
-  # neither credential, require_hardened_bases decides fail vs warn.
-  BACKEND_RUNTIME_APKS: ${{ inputs.runtime_apks }}
   TRIVY_SEVERITY: HIGH,CRITICAL
 
 jobs:
   # --------------------------------------------------------------------------
   # Caller lint — configuration pre-flight before anything expensive runs.
-  # Validates the consumer's caller against the published contract, then (when
-  # require_hardened_bases) checks that at least one hardened-registry pull
-  # secret pair is present. No docker login here — builds still authenticate.
-  # Fail closed: bad caller or missing required registry secrets never scan.
+  # Validates the consumer's caller against the published contract — including
+  # blocking validation of the consumer contract makefile (missing file,
+  # missing ci-manifest/ci-build/ci-smoke-env targets, or an unusable
+  # ci-manifest JSON are lint failures; a missing ci-secctx is a notice) —
+  # then (when require_hardened_bases) checks that at least one
+  # hardened-registry pull secret pair is present. No docker login here —
+  # builds still authenticate. Fail closed: bad caller, broken contract, or
+  # missing required registry secrets never scan.
   # --------------------------------------------------------------------------
   caller-lint:
     name: Caller Lint
@@ -230,13 +157,17 @@ jobs:
     outputs:
       # Normalized containers matrix (primary first, then extras) — the build
       # and image-scan jobs fromJSON() this. Always >=1 entry (the primary),
-      # so those matrices can never be empty.
-      containers: ${{ steps.containers.outputs.containers }}
+      # so those matrices can never be empty. Derived from `make ci-manifest`
+      # images[] (images[0] = primary, images[1:] = extras).
+      containers: ${{ steps.manifest.outputs.containers }}
       # 'true' when the normalized list has any role=extra entry. cluster-smoke
-      # keys its extras artifact download / kind-load on this, so extras are
-      # path-agnostic: input-driven on the legacy path, manifest-driven on the
-      # contract path (where extra_containers is ignored).
-      has_extras: ${{ steps.containers.outputs.has_extras }}
+      # keys its extras artifact download / kind-load on this.
+      has_extras: ${{ steps.manifest.outputs.has_extras }}
+      # Manifest chart{path,values,values_local,release,namespace} and
+      # health{path,port,workload_match} sections (single-line JSON objects).
+      # helm-check and cluster-smoke fromJSON() these — single parse point.
+      chart: ${{ steps.manifest.outputs.chart }}
+      health: ${{ steps.manifest.outputs.health }}
     steps:
       # Consumer repo (github.repository = the caller's repo).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -286,43 +217,34 @@ jobs:
             --contract .ci-scans-lint/contract/security-gate.schema.json \
             --consumer-root "$GITHUB_WORKSPACE"
 
-      # Normalized containers matrix from the resolved gate inputs: the
-      # primary entry (scan_image/dockerfile/context/target + APP_* build
-      # args) plus one entry per extra_containers element. Single-line JSON
-      # (build_args newlines stay escaped inside JSON strings) so it is safe
-      # for GITHUB_OUTPUT.
-      - name: Emit normalized containers matrix
-        id: containers
+      # Normalized manifest from `make ci-manifest`: the containers matrix
+      # (primary = images[0], tagged scan_image; extras = images[1:]) plus the
+      # chart/health sections. lint_caller.py is the single parse point;
+      # single-line JSON so it is safe for GITHUB_OUTPUT.
+      - name: Emit normalized manifest (containers + chart + health)
+        id: manifest
         env:
           GATE_SCAN_IMAGE: ${{ inputs.scan_image }}
-          GATE_DOCKERFILE: ${{ inputs.dockerfile }}
-          GATE_CONTEXT: ${{ inputs.context }}
-          GATE_TARGET: ${{ inputs.target }}
-          GATE_APP_PATH: ${{ inputs.app_path }}
-          GATE_APP_PACKAGE: ${{ inputs.app_package }}
-          GATE_APP_MODULE: ${{ inputs.app_module }}
-          GATE_APP_PORT: ${{ inputs.app_port }}
-          GATE_RUNTIME_APKS: ${{ inputs.runtime_apks }}
-          GATE_EXTRA_BUILD_ARGS: ${{ inputs.extra_build_args }}
-          GATE_EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
-          GATE_USE_CI_CONTRACT: ${{ inputs.use_ci_contract }}
           GATE_CONTRACT_FILE: ${{ inputs.contract_file }}
         run: |
-          # Contract path: the consumer's contract_file is the single source
-          # of truth for the containers list (primary = images[0], extras =
-          # images[1:]); extra_containers is ignored. Legacy path: unchanged.
-          if [ "${GATE_USE_CI_CONTRACT}" = "true" ]; then
-            if ! GATE_CI_MANIFEST="$(make -s -f "${GATE_CONTRACT_FILE}" ci-manifest)"; then
-              echo "::error::caller-lint: 'make -s -f ${GATE_CONTRACT_FILE} ci-manifest' failed (use_ci_contract=true)"
-              exit 1
-            fi
-            export GATE_CI_MANIFEST
+          if ! GATE_CI_MANIFEST="$(make -s -f "${GATE_CONTRACT_FILE}" ci-manifest)"; then
+            echo "::error::caller-lint: 'make -s -f ${GATE_CONTRACT_FILE} ci-manifest' failed"
+            exit 1
           fi
-          containers="$(uv run .ci-scans-lint/scripts/lib/lint_caller.py --emit-containers)"
-          echo "containers=$containers" >> "$GITHUB_OUTPUT"
-          has_extras="$(printf '%s' "$containers" | python3 -c 'import json, sys; print("true" if any(c.get("role") == "extra" for c in json.load(sys.stdin)) else "false")')"
-          echo "has_extras=$has_extras" >> "$GITHUB_OUTPUT"
-          echo "::notice::caller-lint: normalized containers matrix: $containers"
+          export GATE_CI_MANIFEST
+          manifest="$(uv run .ci-scans-lint/scripts/lib/lint_caller.py --emit-manifest)"
+          printf '%s' "$manifest" | python3 -c '
+          import json, os, sys
+          doc = json.load(sys.stdin)
+          sep = (",", ":")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write("containers=" + json.dumps(doc["containers"], separators=sep) + "\n")
+              out.write("chart=" + json.dumps(doc["chart"], separators=sep) + "\n")
+              out.write("health=" + json.dumps(doc["health"], separators=sep) + "\n")
+              extras = any(c.get("role") == "extra" for c in doc["containers"])
+              out.write("has_extras=" + ("true" if extras else "false") + "\n")
+          '
+          echo "::notice::caller-lint: normalized manifest: $manifest"
 
       # Presence-only check: at least one complete registry pair (token AND
       # username). Secrets stay in the env block (Actions auto-redacts
@@ -363,15 +285,16 @@ jobs:
 
   # --------------------------------------------------------------------------
   # Build — one matrixed job over the normalized containers list emitted by
-  # caller-lint (primary first, then extras). Each leg builds its image once,
-  # generates the image SBOM, and uploads the `docker save` tarball artifact.
-  # The primary leg keeps the pre-matrix artifact names (scan-image /
-  # sbom-image); extras keep scan-image-<name> / sbom-image-<name>. Per-leg
-  # buildx cache scopes come from the normalized entry so parallel legs never
-  # collide. The matrix is never empty — the normalized list always contains
-  # the primary entry — so no empty-include plan failure is possible, and
-  # single-image consumers simply run a one-leg matrix (extras legs only
-  # appear when extra_containers is set).
+  # caller-lint (primary first, then extras). Each leg builds its image once
+  # via the consumer contract (`make ci-build IMAGE=<name>` with the hardened
+  # bases resolved by registry-login exported as CI_BUILDER_BASE/
+  # CI_RUNTIME_BASE and the required output tag as CI_IMAGE_TAG), generates
+  # the image SBOM, and uploads the `docker save` tarball artifact. The
+  # primary leg keeps the pre-matrix artifact names (scan-image / sbom-image);
+  # extras keep scan-image-<name> / sbom-image-<name>. The matrix is never
+  # empty — the normalized list always contains the primary entry — so no
+  # empty-include plan failure is possible, and single-image consumers simply
+  # run a one-leg matrix.
   # --------------------------------------------------------------------------
   build:
     name: Build — ${{ matrix.container.name }} image
@@ -420,6 +343,7 @@ jobs:
       - name: Free disk space
         uses: ./.ci-scans/.github/actions/free-disk-space
 
+      # Kept for consumer contract builds that use `docker buildx` in ci-build.
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       # Hardened-base login + primary-base failover resolution — every leg
@@ -451,36 +375,12 @@ jobs:
             echo "$msg"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # BUILDER_IMAGE/RUNTIME_IMAGE come from the login step per leg; the rest
-      # of the leg's build args (primary APP_*/RUNTIME_APKS/extra_build_args,
-      # or an extra's build_args) are pre-joined in the normalized entry.
-      - name: Build image (local load, no push) + SBOM + artifact
-        if: inputs.use_ci_contract != true
-        uses: ./.ci-scans/.github/actions/build-scan-image
-        with:
-          context: ${{ matrix.container.context }}
-          dockerfile: ${{ matrix.container.dockerfile }}
-          target: ${{ matrix.container.target }}
-          image-tag: ${{ matrix.container.image }}
-          build-args: |
-            BUILDER_IMAGE=${{ steps.base-registry.outputs.builder_image }}
-            RUNTIME_IMAGE=${{ steps.base-registry.outputs.runtime_image }}
-            ${{ matrix.container.build_args }}
-          cache-scope: ${{ matrix.container.cache_scope }}
-          sbom-output-file: ${{ matrix.container.role == 'primary' && 'sbom-image.json' || format('sbom-image-{0}.json', matrix.container.name) }}
-          sbom-artifact-name: ${{ matrix.container.role == 'primary' && 'sbom-image' || format('sbom-image-{0}', matrix.container.name) }}
-          # Primary keeps the stable scan-image name (env.IMAGE_ARTIFACT) that
-          # cluster-smoke and the primary image-scan leg download.
-          image-artifact-name: ${{ matrix.container.role == 'primary' && env.IMAGE_ARTIFACT || format('scan-image-{0}', matrix.container.name) }}
-
-      # ---- consumer contract path (use_ci_contract: true) ----
       # The consumer's contract_file owns the docker build: `make ci-build
       # IMAGE=<name>` with the hardened bases resolved above exported as
       # CI_BUILDER_BASE/CI_RUNTIME_BASE and the required output tag as
-      # CI_IMAGE_TAG. SBOM/save/upload then mirror the legacy composite
-      # (same artifact names), so every downstream job is path-agnostic.
+      # CI_IMAGE_TAG. SBOM/save/upload follow with stable artifact names so
+      # every downstream job consumes the same shapes.
       - name: Build image via consumer contract (make ci-build)
-        if: inputs.use_ci_contract == true
         env:
           CONTRACT_FILE: ${{ inputs.contract_file }}
           CI_BUILDER_BASE: ${{ steps.base-registry.outputs.builder_image }}
@@ -495,8 +395,7 @@ jobs:
             exit 1
           fi
 
-      - name: Generate image SBOM (contract path)
-        if: inputs.use_ci_contract == true
+      - name: Generate image SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
         with:
           image: ${{ matrix.container.image }}
@@ -504,14 +403,14 @@ jobs:
           output-file: ${{ matrix.container.role == 'primary' && 'sbom-image.json' || format('sbom-image-{0}.json', matrix.container.name) }}
           artifact-name: ${{ matrix.container.role == 'primary' && 'sbom-image' || format('sbom-image-{0}', matrix.container.name) }}
 
-      - name: Save image to tarball (contract path)
-        if: inputs.use_ci_contract == true
+      - name: Save image to tarball
         env:
           IMG: ${{ matrix.container.image }}
         run: docker save "$IMG" -o image.tar
 
-      - name: Upload image artifact (contract path)
-        if: inputs.use_ci_contract == true
+      # Primary keeps the stable scan-image name (env.IMAGE_ARTIFACT) that
+      # cluster-smoke and the primary image-scan leg download.
+      - name: Upload image artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ${{ matrix.container.role == 'primary' && env.IMAGE_ARTIFACT || format('scan-image-{0}', matrix.container.name) }}
@@ -766,13 +665,18 @@ jobs:
           include-hidden-files: true
 
   # --------------------------------------------------------------------------
-  # Helm chart validity — blocking unless image_only
+  # Helm chart validity — blocking unless image_only. Chart location comes
+  # from the manifest's chart{} section (caller-lint job outputs).
   # --------------------------------------------------------------------------
   helm-check:
     name: Helm Chart Validation
     runs-on: ubuntu-latest
     needs: [caller-lint]
     if: ${{ inputs.image_only != true }}
+    env:
+      HELM_CHART_PATH: ${{ fromJSON(needs.caller-lint.outputs.chart).path }}
+      HELM_VALUES_FILE: ${{ fromJSON(needs.caller-lint.outputs.chart).values }}
+      HELM_RELEASE_NAME: ${{ fromJSON(needs.caller-lint.outputs.chart).release }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
@@ -780,30 +684,18 @@ jobs:
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
 
       - name: Build chart dependencies
-        env:
-          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
         run: helm dependency build "./${HELM_CHART_PATH}"
 
       - name: helm lint
-        env:
-          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
-          HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
         run: helm lint "./${HELM_CHART_PATH}" -f "${HELM_VALUES_FILE}"
 
       - name: helm template (render check)
-        env:
-          HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
-          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
-          HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
         run: helm template "${HELM_RELEASE_NAME}" "./${HELM_CHART_PATH}" -f "${HELM_VALUES_FILE}" > /tmp/rendered-chart.yaml
 
       # Restricted-PSS assertion on the rendered releases — a machine-checkable
       # re-scan of the templated securityContext rows. Ported from the modular
       # helm-validate.yml (which this workflow replaces) so that pod-security
-      # enforcement isn't lost. Consumers with their own secctx make target
-      # keep it; consumers without one (e.g. no root Makefile) fall back to
-      # the gate's bundled checker below, so onboarding never requires
-      # consumer-side tooling.
+      # enforcement isn't lost.
       - name: Resolve callee (ci-scans) ref
         id: calleeref
         env:
@@ -827,65 +719,11 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
 
-      # Probe selects bundled vs consumer make path only, after runner uv is
-      # available for Makefiles that do parse-time uv work. Fail-closed:
-      # missing Makefile / missing target → bundled; other make -n
-      # failures → job error.
-      - name: Probe consumer secctx make target
-        id: secctx
-        if: inputs.use_ci_contract != true
-        env:
-          SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
-        run: |
-          set -uo pipefail
-          if [ ! -f Makefile ]; then
-            echo "use_bundled=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::no Makefile — will run the gate's bundled restricted-PSS assertion"
-            exit 0
-          fi
-          set +e
-          make_out=$(make -n -- "$SECCTX_MAKE_TARGET" 2>&1)
-          make_rc=$?
-          set -e
-          if [ "$make_rc" -eq 0 ]; then
-            echo "use_bundled=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if printf '%s\n' "$make_out" | grep -Eqi "No rule to make target|No targets specified|No such file or directory"; then
-            echo "use_bundled=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::consumer has no '${SECCTX_MAKE_TARGET}' make target — will run the gate's bundled restricted-PSS assertion"
-            exit 0
-          fi
-          echo "::error::make -n ${SECCTX_MAKE_TARGET} failed (not a missing-target); refusing PSS fallback"
-          printf '%s\n' "$make_out"
-          exit 1
-
-
-      - name: Assert rendered pod-security controls (restricted PSS)
-        if: inputs.use_ci_contract != true
-        env:
-          SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
-          USE_BUNDLED: ${{ steps.secctx.outputs.use_bundled }}
-        run: |
-          set -uo pipefail
-          if ! command -v uv >/dev/null 2>&1; then
-            echo "::error::helm-check requires uv on the runner before secctx assert (make or bundled); setup-uv did not provide it"
-            exit 1
-          fi
-          if [ "$USE_BUNDLED" = "true" ]; then
-            uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
-            exit 0
-          fi
-          make -- "$SECCTX_MAKE_TARGET"
-
-      # ---- consumer contract path (use_ci_contract: true) ----
       # The bundled restricted-PSS assertion is GATE POLICY: it always runs
-      # in-gate on the contract path (tamper-proof — a consumer cannot edit
-      # it out of their contract_file). The consumer's own assertion then
-      # runs via `make ci-secctx`; a missing target is a notice, mirroring
-      # the legacy secctx_make_target leniency.
+      # in-gate (tamper-proof — a consumer cannot edit it out of their
+      # contract_file). The consumer's own assertion then runs via
+      # `make ci-secctx`; a missing target is a notice, not a failure.
       - name: Assert rendered pod-security controls (bundled, gate policy)
-        if: inputs.use_ci_contract == true
         run: |
           set -uo pipefail
           if ! command -v uv >/dev/null 2>&1; then
@@ -895,13 +733,12 @@ jobs:
           uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
 
       - name: Run consumer contract secctx (make ci-secctx)
-        if: inputs.use_ci_contract == true
         env:
           CONTRACT_FILE: ${{ inputs.contract_file }}
         run: |
           set -uo pipefail
           if [ ! -f "$CONTRACT_FILE" ]; then
-            echo "::error::use_ci_contract is true but contract file '$CONTRACT_FILE' does not exist"
+            echo "::error::contract file '$CONTRACT_FILE' does not exist"
             exit 1
           fi
           set +e
@@ -920,17 +757,18 @@ jobs:
           make -f "$CONTRACT_FILE" ci-secctx
 
   # --------------------------------------------------------------------------
-  # Cluster smoke — kind + helm install + GET /health against the built image.
+  # Cluster smoke — kind + helm install + health probe against the built image.
   # helm-check (lint/template) is a static render; it can't catch a chart that
   # renders clean but crash-loops on boot (bad env, failed migration, broken
-  # entrypoint). This boots the real image against an ephemeral Postgres.
-  # Ported from the modular pr-gate.yml. Warn-only unless SECURITY_SCAN_BLOCKING.
+  # entrypoint). This boots the real image with the smoke prerequisites
+  # provisioned by the consumer's `make ci-smoke-env` target (DB, secrets,
+  # CRDs). Warn-only unless SECURITY_SCAN_BLOCKING.
   # --------------------------------------------------------------------------
   cluster-smoke:
-    name: Cluster Smoke (kind + helm + /health)
+    name: Cluster Smoke (kind + helm + health)
     runs-on: ubuntu-latest
     # build is matrixed over primary + extras; one success covers them all.
-    # caller-lint is needed only to reference its containers/has_extras outputs.
+    # caller-lint is needed only to reference its manifest job outputs.
     needs: [caller-lint, build]
     if: |
       always() &&
@@ -940,11 +778,11 @@ jobs:
       smoke_ok: ${{ steps.smoke_outcome.outputs.ok }}
     env:
       CLUSTER: ${{ inputs.cluster_name }}
-      NAMESPACE: ${{ inputs.namespace }}
+      NAMESPACE: ${{ fromJSON(needs.caller-lint.outputs.chart).namespace }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      # kind node + pgvector + the loaded backend image strain the runner's
+      # kind node + smoke-env DB + the loaded backend image strain the runner's
       # ~14 GB free disk; reclaim unused toolchains first (mirrors the build job).
       - name: Free disk space
         run: |
@@ -964,10 +802,8 @@ jobs:
       # Extra images are artifact-named scan-image-<name>; pattern excludes the
       # primary scan-image artifact. Each artifact lands in its own subdirectory.
       # Extras legs exist iff the normalized containers list has role=extra
-      # entries (input-driven on the legacy path, manifest-driven on the
-      # contract path — never the raw extra_containers input, which the
-      # contract path ignores). build succeeded per the job `if:`, so their
-      # artifacts are guaranteed present when declared.
+      # entries (manifest images[1:]). build succeeded per the job `if:`, so
+      # their artifacts are guaranteed present when declared.
       - name: Download extra image artifacts
         if: needs.caller-lint.outputs.has_extras == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
@@ -983,7 +819,7 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4
 
-      - name: kind install + helm deploy + /health smoke
+      - name: kind install + helm deploy + health smoke
         id: smoke
         # Warn-only: advisory unless SECURITY_SCAN_BLOCKING=true. Step outcome is
         # recorded below so security-gate can fail closed even when this step
@@ -993,18 +829,16 @@ jobs:
           # Matrix jobs cannot expose per-leg outputs — the primary tag is
           # inputs.scan_image by construction (env.SCAN_IMAGE mirrors it).
           IMAGE: ${{ inputs.scan_image }}
-          APP_PORT: ${{ inputs.app_port }}
-          SERVICE_PORT: ${{ inputs.service_port }}
-          HEALTH_PATH: ${{ inputs.health_path }}
-          SMOKE_WORKLOAD_MATCH: ${{ inputs.smoke_workload_match }}
-          HELM_CHART_PATH: ${{ inputs.helm_chart_path }}
-          HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
-          HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
-          HELM_VALUES_LOCAL_FILE: ${{ inputs.helm_values_local_file }}
+          HEALTH_PORT: ${{ fromJSON(needs.caller-lint.outputs.health).port }}
+          HEALTH_PATH: ${{ fromJSON(needs.caller-lint.outputs.health).path }}
+          SMOKE_WORKLOAD_MATCH: ${{ fromJSON(needs.caller-lint.outputs.health).workload_match }}
+          HELM_CHART_PATH: ${{ fromJSON(needs.caller-lint.outputs.chart).path }}
+          HELM_RELEASE_NAME: ${{ fromJSON(needs.caller-lint.outputs.chart).release }}
+          HELM_VALUES_FILE: ${{ fromJSON(needs.caller-lint.outputs.chart).values }}
+          HELM_VALUES_LOCAL_FILE: ${{ fromJSON(needs.caller-lint.outputs.chart).values_local }}
           CONTAINERS_JSON: ${{ needs.caller-lint.outputs.containers }}
           SMOKE_SECRETS: ${{ inputs.smoke_secrets }}
           EXTRAS_BUILT: ${{ needs.caller-lint.outputs.has_extras }}
-          USE_CI_CONTRACT: ${{ inputs.use_ci_contract }}
           CONTRACT_FILE: ${{ inputs.contract_file }}
         run: |
           set -uo pipefail
@@ -1015,10 +849,9 @@ jobs:
           # Kind-load every built extras image so charts that schedule them with
           # pullPolicy: Never do not hit ErrImageNeverPull. The list comes from
           # the normalized containers output (role=extra) — the same source the
-          # build matrix used — so tags and artifact names match by construction
-          # on both paths (legacy: extra_containers input; contract: manifest).
-          # Fail closed when extras were declared (and thus built) but an
-          # artifact/tag is missing.
+          # build matrix used (manifest images[1:]) — so tags and artifact names
+          # match by construction. Fail closed when extras were declared (and
+          # thus built) but an artifact/tag is missing.
           if [ "${EXTRAS_BUILT}" = "true" ]; then
             python3 - <<'PY' || fail "kind load of extras failed"
           import json, os, subprocess, sys
@@ -1045,51 +878,9 @@ jobs:
 
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
 
-          # Contract path: the consumer's contract_file provisions the smoke
-          # prerequisites (DB, default secret, CRDs) — the inline scaffold
-          # below is the legacy path, unchanged when the flag is false.
-          if [ "${USE_CI_CONTRACT}" = "true" ]; then
-            make -f "${CONTRACT_FILE}" ci-smoke-env NAMESPACE="${NAMESPACE}" || fail "make ci-smoke-env failed"
-          else
-
-          # Ephemeral Postgres (chart does not provision a DB).
-          cat <<'EOF' | kubectl -n "${NAMESPACE}" apply -f -
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: app-postgres
-          spec:
-            replicas: 1
-            selector: { matchLabels: { app: app-postgres } }
-            template:
-              metadata: { labels: { app: app-postgres } }
-              spec:
-                containers:
-                  - name: postgres
-                    image: pgvector/pgvector:pg16
-                    env:
-                      - { name: POSTGRES_USER, value: postgres }
-                      - { name: POSTGRES_PASSWORD, value: postgres }
-                      - { name: POSTGRES_DB, value: appdb }
-                    ports: [{ containerPort: 5432 }]
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: app-postgres
-          spec:
-            selector: { app: app-postgres }
-            ports: [{ port: 5432, targetPort: 5432 }]
-          EOF
-
-          kubectl -n "${NAMESPACE}" rollout status deploy/app-postgres --timeout=120s || fail "postgres not ready"
-
-          # Default DATABASE_URL helper for charts that expect app-database-url.
-          # Callers whose secret name differs (e.g. aca-database-url) pass smoke_secrets.
-          kubectl -n "${NAMESPACE}" create secret generic app-database-url \
-            --from-literal=DATABASE_URL="postgresql://postgres:postgres@app-postgres:5432/appdb" \
-            --dry-run=client -o yaml | kubectl apply -f -
-          fi
+          # The consumer's contract_file provisions the smoke prerequisites
+          # (DB, default secret, CRDs) — see docs/CI-CONTRACT.md.
+          make -f "${CONTRACT_FILE}" ci-smoke-env NAMESPACE="${NAMESPACE}" || fail "make ci-smoke-env failed"
 
           # Optional caller-declared Secrets (CI fixture literals only).
           python3 - <<'PY' || fail "smoke_secrets create failed"
@@ -1136,21 +927,10 @@ jobs:
               print(f"created smoke secret {name}")
           PY
 
-          # The chart renders an HTTPRoute (Gateway API). kind ships no Gateway
-          # API CRDs, so install them (server-side: these CRDs exceed the
-          # client-side annotation limit). No controller is needed — the smoke
-          # reaches the backend via port-forward, not the gateway. On the
-          # contract path ci-smoke-env owns CRD provisioning.
-          if [ "${USE_CI_CONTRACT}" != "true" ]; then
-            kubectl apply --server-side -f \
-              https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
-              || fail "gateway-api CRD install failed"
-          fi
-
           helm dependency build "./${HELM_CHART_PATH}" || fail "helm dependency build failed"
 
           # Install the app. The post-install migration hook runs alembic against
-          # the Postgres above (from the backend image, pullPolicy Never — hence
+          # the ci-smoke-env DB (from the backend image, pullPolicy Never — hence
           # SCAN_IMAGE must equal values-local's scan_image). Extra images are
           # kind-loaded above when extras were built; don't --wait on the whole
           # release — gate on the backend rollout / health probe explicitly.
@@ -1172,7 +952,7 @@ jobs:
           # `|| true`: grep exits 1 on no match and the step's errexit (GHA's
           # default `bash -e {0}`) would kill it here, skipping the fail-guard
           # below — the guard is the user-visible error. Workload name matching
-          # is configurable via the smoke_workload_match input (default 'backend').
+          # comes from the manifest's health.workload_match (default 'backend').
           backend_deploy=$(kubectl -n "${NAMESPACE}" get deploy -o name | grep -i "$SMOKE_WORKLOAD_MATCH" | head -1 || true)
           [ -n "${backend_deploy}" ] || fail "no backend deployment found"
           kubectl -n "${NAMESPACE}" rollout status "${backend_deploy}" --timeout=180s || {
@@ -1189,10 +969,10 @@ jobs:
 
           backend_svc=$(kubectl -n "${NAMESPACE}" get svc -o name | grep -i "$SMOKE_WORKLOAD_MATCH" | head -1 || true)
           [ -n "${backend_svc}" ] || fail "no backend service found"
-          kubectl -n "${NAMESPACE}" port-forward "${backend_svc}" "${APP_PORT}:${SERVICE_PORT}" >/tmp/pf.log 2>&1 &
+          kubectl -n "${NAMESPACE}" port-forward "${backend_svc}" "${HEALTH_PORT}:${HEALTH_PORT}" >/tmp/pf.log 2>&1 &
           pf_pid=$!
           sleep 6
-          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}${HEALTH_PATH}" || echo 000)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HEALTH_PORT}${HEALTH_PATH}" || echo 000)
           kill "${pf_pid}" 2>/dev/null || true
           echo "GET ${HEALTH_PATH} -> ${code}"
           [ "${code}" = "200" ] || fail "${HEALTH_PATH} returned ${code}, expected 200"

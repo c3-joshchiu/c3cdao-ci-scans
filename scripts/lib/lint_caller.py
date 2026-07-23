@@ -27,6 +27,9 @@ extra-containers-json, extra-containers-name, extra-containers-duplicate,
 extra-containers-dockerfile, extra-containers-template-path,
 extra-containers-target, extra-containers-build-arg, smoke-secrets-json,
 smoke-secrets-name, smoke-secrets-duplicate, smoke-secrets-literals.
+When the caller sets ``use_ci_contract: true``, the consumer contract file
+is validated WARN-ONLY (stderr ``notice: warn: ...``, never a violation):
+ci-contract-file, ci-contract-target, ci-contract-manifest.
 An unreadable caller (missing/unparseable file, or no job whose ``uses:``
 matches the reusable gate workflow) fails closed.
 """
@@ -35,6 +38,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -394,6 +398,124 @@ def check_smoke_secrets(with_map: dict[str, Any]) -> list[str]:
     return violations
 
 
+# --- consumer build contract (use_ci_contract) -------------------------------
+# WARN-ONLY validation: the contract path is opt-in and consumer-owned, so a
+# broken contract file surfaces as stderr notices (``notice: warn: ...``),
+# never as lint violations. Rule ids: ci-contract-file (missing/unreadable
+# contract file), ci-contract-target (a required make target is absent),
+# ci-contract-manifest (ci-manifest output is not the required JSON shape).
+
+_CI_CONTRACT_TARGETS = ("ci-manifest", "ci-build", "ci-secctx", "ci-smoke-env")
+_CI_MANIFEST_REQUIRED: dict[str, tuple[str, ...]] = {
+    "chart": ("path", "values", "values_local", "release", "namespace"),
+    "health": ("path", "port", "workload_match"),
+}
+
+
+def _make_target_missing(contract_path: Path, target: str, cwd: Path) -> str | None:
+    """Return a warn detail when ``make -n`` can't resolve ``target``."""
+    try:
+        proc = subprocess.run(
+            ["make", "-n", "-f", str(contract_path), target],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"make -n {target}: {e}"
+    if proc.returncode == 0:
+        return None
+    return f"make -n {target} failed (rc={proc.returncode}): {proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'no stderr'}"
+
+
+def check_ci_manifest_shape(manifest: Any) -> list[str]:
+    """Return warn details for missing required ci-manifest keys."""
+    problems: list[str] = []
+    if not isinstance(manifest, dict):
+        return [f"manifest must be a JSON object, got {yaml_json_type(manifest)}"]
+    images = manifest.get("images")
+    if not isinstance(images, list) or not images:
+        problems.append("'images' must be a non-empty array")
+    else:
+        for idx, entry in enumerate(images):
+            if not isinstance(entry, dict):
+                problems.append(f"images[{idx}] is not an object")
+                continue
+            if not isinstance(entry.get("name"), str) or not entry["name"]:
+                problems.append(f"images[{idx}] missing 'name'")
+    for section, keys in _CI_MANIFEST_REQUIRED.items():
+        node = manifest.get(section)
+        if not isinstance(node, dict):
+            problems.append(f"'{section}' must be an object")
+            continue
+        missing = [k for k in keys if k not in node]
+        if missing:
+            problems.append(f"'{section}' missing key(s) {missing}")
+    return problems
+
+
+def check_ci_contract(
+    with_map: dict[str, Any],
+    props: dict[str, Any],
+    consumer_root: Path | None,
+) -> list[str]:
+    """Warn-only contract-file validation; always returns no violations."""
+    if contract_value(with_map, props, "use_ci_contract") is not True:
+        return []
+    contract_file = contract_value(with_map, props, "contract_file")
+    if is_expression(contract_file):
+        notice("skip", "ci-contract-file", "contract_file is an expression")
+        return []
+    if consumer_root is None:
+        notice("skip", "ci-contract-file", "--consumer-root not given")
+        return []
+    contract_path = (consumer_root / str(contract_file)).resolve()
+    if not contract_path.is_file():
+        notice(
+            "warn",
+            "ci-contract-file",
+            f"use_ci_contract is true but '{contract_file}' not found under "
+            f"consumer root '{consumer_root}'",
+        )
+        return []
+    notice("active", "ci-contract-file", f"checked {contract_path}")
+    for target in _CI_CONTRACT_TARGETS:
+        detail = _make_target_missing(contract_path, target, consumer_root)
+        if detail is not None:
+            notice("warn", "ci-contract-target", f"{contract_file}: {detail}")
+    try:
+        proc = subprocess.run(
+            ["make", "-s", "-f", str(contract_path), "ci-manifest"],
+            cwd=consumer_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        notice("warn", "ci-contract-manifest", f"{contract_file}: ci-manifest: {e}")
+        return []
+    if proc.returncode != 0:
+        notice(
+            "warn",
+            "ci-contract-manifest",
+            f"{contract_file}: ci-manifest exited {proc.returncode}",
+        )
+        return []
+    try:
+        manifest = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        notice(
+            "warn",
+            "ci-contract-manifest",
+            f"{contract_file}: ci-manifest output is not valid JSON: {e}",
+        )
+        return []
+    for problem in check_ci_manifest_shape(manifest):
+        notice("warn", "ci-contract-manifest", f"{contract_file}: {problem}")
+    return []
+
+
 # --- normalized containers matrix (--emit-containers) -----------------------
 # Consumed by the gate workflow: caller-lint emits this list; the matrixed
 # build and image-scan jobs fromJSON() it. Entry schema:
@@ -476,9 +598,66 @@ def normalized_containers(
     return containers
 
 
+def manifest_containers(manifest_raw: str, scan_image: str) -> list[dict[str, str]]:
+    """Normalized containers list from a contract ci-manifest JSON document.
+
+    Contract path (use_ci_contract=true): the manifest is the single source
+    of truth — images[0] is the primary (always tagged with the gate's
+    scan_image input; a manifest ``image`` key on the primary is ignored),
+    images[1:] are the extras, tagged by their optional ``image`` key or
+    <name>:local when absent (the legacy extra_containers[].image
+    semantics). extra_containers is ignored on this path. Entry shape
+    matches normalized_containers();
+    dockerfile/context/target/build_args ride along untouched (the contract
+    build path does not consume them — `make ci-build` owns the build).
+    Fails closed (SystemExit) on an unusable manifest.
+    """
+    try:
+        manifest = json.loads(manifest_raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"error: ci-manifest output is not valid JSON: {e}") from e
+    if not isinstance(manifest, dict):
+        raise SystemExit("error: ci-manifest output must be a JSON object")
+    images = manifest.get("images")
+    if not isinstance(images, list) or not images:
+        raise SystemExit("error: ci-manifest 'images' must be a non-empty array")
+    containers: list[dict[str, str]] = []
+    for idx, entry in enumerate(images):
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise SystemExit(f"error: ci-manifest images[{idx}] missing name")
+        name = entry["name"]
+        primary = idx == 0
+        containers.append(
+            {
+                "name": name,
+                "role": "primary" if primary else "extra",
+                "image": (
+                    scan_image
+                    if primary
+                    else str(entry.get("image") or f"{name}:local")
+                ),
+                "dockerfile": str(entry.get("dockerfile") or ""),
+                "context": str(entry.get("context") or "."),
+                "target": str(entry.get("target") or ""),
+                "build_args": str(entry.get("build_args") or ""),
+                "cache_scope": (
+                    _PRIMARY_CACHE_SCOPE if primary else f"security-scan-{name}"
+                ),
+            }
+        )
+    return containers
+
+
 def emit_containers() -> int:
     """Print the normalized containers matrix (single-line JSON) from env."""
     env = os.environ.get
+    if env("GATE_USE_CI_CONTRACT", "") == "true":
+        containers = manifest_containers(
+            manifest_raw=env("GATE_CI_MANIFEST", ""),
+            scan_image=env("GATE_SCAN_IMAGE", ""),
+        )
+        print(json.dumps(containers, separators=(",", ":")))
+        return 0
     containers = normalized_containers(
         scan_image=env("GATE_SCAN_IMAGE", ""),
         dockerfile=env("GATE_DOCKERFILE", ""),
@@ -562,6 +741,7 @@ def lint(
     violations.extend(check_extra_containers(with_map))
     violations.extend(check_smoke_secrets(with_map))
     violations.extend(check_image_values(with_map, props, consumer_root))
+    violations.extend(check_ci_contract(with_map, props, consumer_root))
     return violations
 
 

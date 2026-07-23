@@ -169,6 +169,14 @@ on:
         description: "When true, skip helm-check and cluster-smoke (and omit them from the Security Gate blocking set) — for infra/image-only repos that build and vuln-scan images without a deployable app chart. Default false keeps app callers unchanged (helm + smoke still blocking)."
         type: boolean
         default: false
+      use_ci_contract:
+        description: "Consumer build contract flag. false (default): the gate owns build knowledge — images build from the dockerfile/context/target/APP_* inputs, secctx uses secctx_make_target, and cluster-smoke provisions its inline Postgres/secret/CRD scaffold (current behavior, unchanged). true: the consumer repo owns build knowledge via contract_file — the containers list comes from `make ci-manifest` (extra_containers is ignored; manifest images[0] is the primary, images[1:] are the extras), each image builds via `make ci-build IMAGE=<name>` with CI_BUILDER_BASE/CI_RUNTIME_BASE/CI_IMAGE_TAG env, secctx runs `make ci-secctx`, and cluster-smoke provisions via `make ci-smoke-env NAMESPACE=<ns>`. The gate's bundled restricted-PSS assertion runs in-gate on BOTH paths — it is gate policy and cannot be delegated. See docs/CI-CONTRACT.md."
+        type: boolean
+        default: false
+      contract_file:
+        description: "Path (relative to the consumer repo root) of the consumer build-contract Makefile providing the ci-manifest / ci-build / ci-secctx / ci-smoke-env targets. Only read when use_ci_contract is true. Start from templates/consumer/Makefile.ci."
+        type: string
+        default: Makefile.ci
     secrets:
       CGR_PULL_TOKEN:
         required: false
@@ -224,6 +232,11 @@ jobs:
       # and image-scan jobs fromJSON() this. Always >=1 entry (the primary),
       # so those matrices can never be empty.
       containers: ${{ steps.containers.outputs.containers }}
+      # 'true' when the normalized list has any role=extra entry. cluster-smoke
+      # keys its extras artifact download / kind-load on this, so extras are
+      # path-agnostic: input-driven on the legacy path, manifest-driven on the
+      # contract path (where extra_containers is ignored).
+      has_extras: ${{ steps.containers.outputs.has_extras }}
     steps:
       # Consumer repo (github.repository = the caller's repo).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -292,9 +305,23 @@ jobs:
           GATE_RUNTIME_APKS: ${{ inputs.runtime_apks }}
           GATE_EXTRA_BUILD_ARGS: ${{ inputs.extra_build_args }}
           GATE_EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
+          GATE_USE_CI_CONTRACT: ${{ inputs.use_ci_contract }}
+          GATE_CONTRACT_FILE: ${{ inputs.contract_file }}
         run: |
+          # Contract path: the consumer's contract_file is the single source
+          # of truth for the containers list (primary = images[0], extras =
+          # images[1:]); extra_containers is ignored. Legacy path: unchanged.
+          if [ "${GATE_USE_CI_CONTRACT}" = "true" ]; then
+            if ! GATE_CI_MANIFEST="$(make -s -f "${GATE_CONTRACT_FILE}" ci-manifest)"; then
+              echo "::error::caller-lint: 'make -s -f ${GATE_CONTRACT_FILE} ci-manifest' failed (use_ci_contract=true)"
+              exit 1
+            fi
+            export GATE_CI_MANIFEST
+          fi
           containers="$(uv run .ci-scans-lint/scripts/lib/lint_caller.py --emit-containers)"
           echo "containers=$containers" >> "$GITHUB_OUTPUT"
+          has_extras="$(printf '%s' "$containers" | python3 -c 'import json, sys; print("true" if any(c.get("role") == "extra" for c in json.load(sys.stdin)) else "false")')"
+          echo "has_extras=$has_extras" >> "$GITHUB_OUTPUT"
           echo "::notice::caller-lint: normalized containers matrix: $containers"
 
       # Presence-only check: at least one complete registry pair (token AND
@@ -428,6 +455,7 @@ jobs:
       # of the leg's build args (primary APP_*/RUNTIME_APKS/extra_build_args,
       # or an extra's build_args) are pre-joined in the normalized entry.
       - name: Build image (local load, no push) + SBOM + artifact
+        if: inputs.use_ci_contract != true
         uses: ./.ci-scans/.github/actions/build-scan-image
         with:
           context: ${{ matrix.container.context }}
@@ -444,6 +472,52 @@ jobs:
           # Primary keeps the stable scan-image name (env.IMAGE_ARTIFACT) that
           # cluster-smoke and the primary image-scan leg download.
           image-artifact-name: ${{ matrix.container.role == 'primary' && env.IMAGE_ARTIFACT || format('scan-image-{0}', matrix.container.name) }}
+
+      # ---- consumer contract path (use_ci_contract: true) ----
+      # The consumer's contract_file owns the docker build: `make ci-build
+      # IMAGE=<name>` with the hardened bases resolved above exported as
+      # CI_BUILDER_BASE/CI_RUNTIME_BASE and the required output tag as
+      # CI_IMAGE_TAG. SBOM/save/upload then mirror the legacy composite
+      # (same artifact names), so every downstream job is path-agnostic.
+      - name: Build image via consumer contract (make ci-build)
+        if: inputs.use_ci_contract == true
+        env:
+          CONTRACT_FILE: ${{ inputs.contract_file }}
+          CI_BUILDER_BASE: ${{ steps.base-registry.outputs.builder_image }}
+          CI_RUNTIME_BASE: ${{ steps.base-registry.outputs.runtime_image }}
+          CI_IMAGE_TAG: ${{ matrix.container.image }}
+          IMAGE_NAME: ${{ matrix.container.name }}
+        run: |
+          set -euo pipefail
+          make -f "$CONTRACT_FILE" ci-build IMAGE="$IMAGE_NAME"
+          if ! docker image inspect "$CI_IMAGE_TAG" >/dev/null 2>&1; then
+            echo "::error::contract ci-build for IMAGE '$IMAGE_NAME' did not produce the required tag '$CI_IMAGE_TAG' (CI_IMAGE_TAG)"
+            exit 1
+          fi
+
+      - name: Generate image SBOM (contract path)
+        if: inputs.use_ci_contract == true
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          image: ${{ matrix.container.image }}
+          format: cyclonedx-json
+          output-file: ${{ matrix.container.role == 'primary' && 'sbom-image.json' || format('sbom-image-{0}.json', matrix.container.name) }}
+          artifact-name: ${{ matrix.container.role == 'primary' && 'sbom-image' || format('sbom-image-{0}', matrix.container.name) }}
+
+      - name: Save image to tarball (contract path)
+        if: inputs.use_ci_contract == true
+        env:
+          IMG: ${{ matrix.container.image }}
+        run: docker save "$IMG" -o image.tar
+
+      - name: Upload image artifact (contract path)
+        if: inputs.use_ci_contract == true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ matrix.container.role == 'primary' && env.IMAGE_ARTIFACT || format('scan-image-{0}', matrix.container.name) }}
+          path: image.tar
+          if-no-files-found: error
+          retention-days: 1
 
   # --------------------------------------------------------------------------
   # Secrets detection — TruffleHog (diff-aware, verified only)
@@ -759,6 +833,7 @@ jobs:
       # failures → job error.
       - name: Probe consumer secctx make target
         id: secctx
+        if: inputs.use_ci_contract != true
         env:
           SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
         run: |
@@ -787,6 +862,7 @@ jobs:
 
 
       - name: Assert rendered pod-security controls (restricted PSS)
+        if: inputs.use_ci_contract != true
         env:
           SECCTX_MAKE_TARGET: ${{ inputs.secctx_make_target }}
           USE_BUNDLED: ${{ steps.secctx.outputs.use_bundled }}
@@ -802,6 +878,47 @@ jobs:
           fi
           make -- "$SECCTX_MAKE_TARGET"
 
+      # ---- consumer contract path (use_ci_contract: true) ----
+      # The bundled restricted-PSS assertion is GATE POLICY: it always runs
+      # in-gate on the contract path (tamper-proof — a consumer cannot edit
+      # it out of their contract_file). The consumer's own assertion then
+      # runs via `make ci-secctx`; a missing target is a notice, mirroring
+      # the legacy secctx_make_target leniency.
+      - name: Assert rendered pod-security controls (bundled, gate policy)
+        if: inputs.use_ci_contract == true
+        run: |
+          set -uo pipefail
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "::error::helm-check requires uv on the runner for the bundled restricted-PSS assertion; setup-uv did not provide it"
+            exit 1
+          fi
+          uv run .ci-scans/scripts/lib/assert_restricted_pss.py /tmp/rendered-chart.yaml
+
+      - name: Run consumer contract secctx (make ci-secctx)
+        if: inputs.use_ci_contract == true
+        env:
+          CONTRACT_FILE: ${{ inputs.contract_file }}
+        run: |
+          set -uo pipefail
+          if [ ! -f "$CONTRACT_FILE" ]; then
+            echo "::error::use_ci_contract is true but contract file '$CONTRACT_FILE' does not exist"
+            exit 1
+          fi
+          set +e
+          make_out=$(make -n -f "$CONTRACT_FILE" ci-secctx 2>&1)
+          make_rc=$?
+          set -e
+          if [ "$make_rc" -ne 0 ]; then
+            if printf '%s\n' "$make_out" | grep -Eqi "No rule to make target|No targets specified"; then
+              echo "::notice::contract file '$CONTRACT_FILE' has no ci-secctx target — bundled restricted-PSS assertion (above) is the coverage"
+              exit 0
+            fi
+            echo "::error::make -n -f $CONTRACT_FILE ci-secctx failed (not a missing-target)"
+            printf '%s\n' "$make_out"
+            exit 1
+          fi
+          make -f "$CONTRACT_FILE" ci-secctx
+
   # --------------------------------------------------------------------------
   # Cluster smoke — kind + helm install + GET /health against the built image.
   # helm-check (lint/template) is a static render; it can't catch a chart that
@@ -813,7 +930,8 @@ jobs:
     name: Cluster Smoke (kind + helm + /health)
     runs-on: ubuntu-latest
     # build is matrixed over primary + extras; one success covers them all.
-    needs: [build]
+    # caller-lint is needed only to reference its containers/has_extras outputs.
+    needs: [caller-lint, build]
     if: |
       always() &&
       inputs.image_only != true &&
@@ -845,10 +963,13 @@ jobs:
 
       # Extra images are artifact-named scan-image-<name>; pattern excludes the
       # primary scan-image artifact. Each artifact lands in its own subdirectory.
-      # Extras legs exist iff extra_containers is set (build succeeded per the
-      # job `if:`, so their artifacts are guaranteed present when declared).
+      # Extras legs exist iff the normalized containers list has role=extra
+      # entries (input-driven on the legacy path, manifest-driven on the
+      # contract path — never the raw extra_containers input, which the
+      # contract path ignores). build succeeded per the job `if:`, so their
+      # artifacts are guaranteed present when declared.
       - name: Download extra image artifacts
-        if: inputs.extra_containers != '' && inputs.extra_containers != '[]'
+        if: needs.caller-lint.outputs.has_extras == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: scan-image-*
@@ -880,45 +1001,36 @@ jobs:
           HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
           HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
           HELM_VALUES_LOCAL_FILE: ${{ inputs.helm_values_local_file }}
-          EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
+          CONTAINERS_JSON: ${{ needs.caller-lint.outputs.containers }}
           SMOKE_SECRETS: ${{ inputs.smoke_secrets }}
-          EXTRAS_BUILT: ${{ (inputs.extra_containers != '' && inputs.extra_containers != '[]') && 'true' || 'false' }}
+          EXTRAS_BUILT: ${{ needs.caller-lint.outputs.has_extras }}
+          USE_CI_CONTRACT: ${{ inputs.use_ci_contract }}
+          CONTRACT_FILE: ${{ inputs.contract_file }}
         run: |
           set -uo pipefail
           fail() { echo "::warning::cluster-smoke: $1"; exit 1; }
 
           kind load docker-image "${IMAGE}" --name "${CLUSTER}" || fail "kind load failed"
 
-          # Kind-load every built extra_containers image so charts that schedule
-          # them with pullPolicy: Never do not hit ErrImageNeverPull. Fail closed
-          # when extras were declared (and thus built) but an artifact/tag is
-          # missing.
+          # Kind-load every built extras image so charts that schedule them with
+          # pullPolicy: Never do not hit ErrImageNeverPull. The list comes from
+          # the normalized containers output (role=extra) — the same source the
+          # build matrix used — so tags and artifact names match by construction
+          # on both paths (legacy: extra_containers input; contract: manifest).
+          # Fail closed when extras were declared (and thus built) but an
+          # artifact/tag is missing.
           if [ "${EXTRAS_BUILT}" = "true" ]; then
-            python3 - <<'PY' || fail "kind load of extra_containers failed"
+            python3 - <<'PY' || fail "kind load of extras failed"
           import json, os, subprocess, sys
           from pathlib import Path
 
-          raw = (os.environ.get("EXTRA_CONTAINERS") or "").strip()
-          if not raw or raw == "[]":
-              sys.exit(0)
-          try:
-              entries = json.loads(raw)
-          except json.JSONDecodeError as e:
-              print(f"invalid extra_containers JSON: {e}", file=sys.stderr)
-              sys.exit(1)
-          if not isinstance(entries, list):
-              print("extra_containers must be a JSON array", file=sys.stderr)
-              sys.exit(1)
+          entries = json.loads(os.environ["CONTAINERS_JSON"])
           cluster = os.environ["CLUSTER"]
-          for idx, entry in enumerate(entries):
-              if not isinstance(entry, dict):
-                  print(f"extra_containers entry {idx} is not an object", file=sys.stderr)
-                  sys.exit(1)
-              name = entry.get("name")
-              if not isinstance(name, str) or not name:
-                  print(f"extra_containers entry {idx} missing name", file=sys.stderr)
-                  sys.exit(1)
-              tag = entry.get("image") or f"{name}:local"
+          for entry in entries:
+              if entry.get("role") != "extra":
+                  continue
+              name = entry["name"]
+              tag = entry["image"]
               tar = Path("extra-images") / f"scan-image-{name}" / "image.tar"
               if not tar.is_file():
                   print(f"missing artifact for extra '{name}' at {tar}", file=sys.stderr)
@@ -932,6 +1044,13 @@ jobs:
           fi
 
           kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          # Contract path: the consumer's contract_file provisions the smoke
+          # prerequisites (DB, default secret, CRDs) — the inline scaffold
+          # below is the legacy path, unchanged when the flag is false.
+          if [ "${USE_CI_CONTRACT}" = "true" ]; then
+            make -f "${CONTRACT_FILE}" ci-smoke-env NAMESPACE="${NAMESPACE}" || fail "make ci-smoke-env failed"
+          else
 
           # Ephemeral Postgres (chart does not provision a DB).
           cat <<'EOF' | kubectl -n "${NAMESPACE}" apply -f -
@@ -970,6 +1089,7 @@ jobs:
           kubectl -n "${NAMESPACE}" create secret generic app-database-url \
             --from-literal=DATABASE_URL="postgresql://postgres:postgres@app-postgres:5432/appdb" \
             --dry-run=client -o yaml | kubectl apply -f -
+          fi
 
           # Optional caller-declared Secrets (CI fixture literals only).
           python3 - <<'PY' || fail "smoke_secrets create failed"
@@ -1019,10 +1139,13 @@ jobs:
           # The chart renders an HTTPRoute (Gateway API). kind ships no Gateway
           # API CRDs, so install them (server-side: these CRDs exceed the
           # client-side annotation limit). No controller is needed — the smoke
-          # reaches the backend via port-forward, not the gateway.
-          kubectl apply --server-side -f \
-            https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
-            || fail "gateway-api CRD install failed"
+          # reaches the backend via port-forward, not the gateway. On the
+          # contract path ci-smoke-env owns CRD provisioning.
+          if [ "${USE_CI_CONTRACT}" != "true" ]; then
+            kubectl apply --server-side -f \
+              https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.1/standard-install.yaml \
+              || fail "gateway-api CRD install failed"
+          fi
 
           helm dependency build "./${HELM_CHART_PATH}" || fail "helm dependency build failed"
 

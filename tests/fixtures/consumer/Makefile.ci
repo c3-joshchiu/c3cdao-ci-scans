@@ -16,11 +16,13 @@
 #   ci-smoke-env NAMESPACE=<ns> provision cluster-smoke prerequisites in <ns>
 #                               (DB, secrets, CRDs) before helm install
 #
-# Manifest JSON shape (all keys required; images[0] is the PRIMARY —
-# the gate tags it with its scan_image input; images[1:] are extras,
-# tagged <name>:local):
+# Manifest JSON shape (images[0] is the PRIMARY — the gate always tags it
+# with its scan_image input; images[1:] are extras, tagged by their optional
+# "image" key or <name>:local when absent — that tag must match what your
+# values file schedules with pullPolicy: Never):
 #   {
-#     "images": [{"name", "dockerfile", "context", "target", "build_args"}],
+#     "images": [{"name", "dockerfile", "context", "target", "build_args",
+#                 "image" (optional, extras only)}],
 #     "chart":  {"path", "values", "values_local", "release", "namespace"},
 #     "health": {"path", "port", "workload_match"}
 #   }

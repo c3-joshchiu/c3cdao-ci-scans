@@ -232,6 +232,11 @@ jobs:
       # and image-scan jobs fromJSON() this. Always >=1 entry (the primary),
       # so those matrices can never be empty.
       containers: ${{ steps.containers.outputs.containers }}
+      # 'true' when the normalized list has any role=extra entry. cluster-smoke
+      # keys its extras artifact download / kind-load on this, so extras are
+      # path-agnostic: input-driven on the legacy path, manifest-driven on the
+      # contract path (where extra_containers is ignored).
+      has_extras: ${{ steps.containers.outputs.has_extras }}
     steps:
       # Consumer repo (github.repository = the caller's repo).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
@@ -315,6 +320,8 @@ jobs:
           fi
           containers="$(uv run .ci-scans-lint/scripts/lib/lint_caller.py --emit-containers)"
           echo "containers=$containers" >> "$GITHUB_OUTPUT"
+          has_extras="$(printf '%s' "$containers" | python3 -c 'import json, sys; print("true" if any(c.get("role") == "extra" for c in json.load(sys.stdin)) else "false")')"
+          echo "has_extras=$has_extras" >> "$GITHUB_OUTPUT"
           echo "::notice::caller-lint: normalized containers matrix: $containers"
 
       # Presence-only check: at least one complete registry pair (token AND
@@ -923,7 +930,8 @@ jobs:
     name: Cluster Smoke (kind + helm + /health)
     runs-on: ubuntu-latest
     # build is matrixed over primary + extras; one success covers them all.
-    needs: [build]
+    # caller-lint is needed only to reference its containers/has_extras outputs.
+    needs: [caller-lint, build]
     if: |
       always() &&
       inputs.image_only != true &&
@@ -955,10 +963,13 @@ jobs:
 
       # Extra images are artifact-named scan-image-<name>; pattern excludes the
       # primary scan-image artifact. Each artifact lands in its own subdirectory.
-      # Extras legs exist iff extra_containers is set (build succeeded per the
-      # job `if:`, so their artifacts are guaranteed present when declared).
+      # Extras legs exist iff the normalized containers list has role=extra
+      # entries (input-driven on the legacy path, manifest-driven on the
+      # contract path — never the raw extra_containers input, which the
+      # contract path ignores). build succeeded per the job `if:`, so their
+      # artifacts are guaranteed present when declared.
       - name: Download extra image artifacts
-        if: inputs.extra_containers != '' && inputs.extra_containers != '[]'
+        if: needs.caller-lint.outputs.has_extras == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           pattern: scan-image-*
@@ -990,9 +1001,9 @@ jobs:
           HELM_RELEASE_NAME: ${{ inputs.helm_release_name }}
           HELM_VALUES_FILE: ${{ inputs.helm_values_file }}
           HELM_VALUES_LOCAL_FILE: ${{ inputs.helm_values_local_file }}
-          EXTRA_CONTAINERS: ${{ inputs.extra_containers }}
+          CONTAINERS_JSON: ${{ needs.caller-lint.outputs.containers }}
           SMOKE_SECRETS: ${{ inputs.smoke_secrets }}
-          EXTRAS_BUILT: ${{ (inputs.extra_containers != '' && inputs.extra_containers != '[]') && 'true' || 'false' }}
+          EXTRAS_BUILT: ${{ needs.caller-lint.outputs.has_extras }}
           USE_CI_CONTRACT: ${{ inputs.use_ci_contract }}
           CONTRACT_FILE: ${{ inputs.contract_file }}
         run: |
@@ -1001,36 +1012,25 @@ jobs:
 
           kind load docker-image "${IMAGE}" --name "${CLUSTER}" || fail "kind load failed"
 
-          # Kind-load every built extra_containers image so charts that schedule
-          # them with pullPolicy: Never do not hit ErrImageNeverPull. Fail closed
-          # when extras were declared (and thus built) but an artifact/tag is
-          # missing.
+          # Kind-load every built extras image so charts that schedule them with
+          # pullPolicy: Never do not hit ErrImageNeverPull. The list comes from
+          # the normalized containers output (role=extra) — the same source the
+          # build matrix used — so tags and artifact names match by construction
+          # on both paths (legacy: extra_containers input; contract: manifest).
+          # Fail closed when extras were declared (and thus built) but an
+          # artifact/tag is missing.
           if [ "${EXTRAS_BUILT}" = "true" ]; then
-            python3 - <<'PY' || fail "kind load of extra_containers failed"
+            python3 - <<'PY' || fail "kind load of extras failed"
           import json, os, subprocess, sys
           from pathlib import Path
 
-          raw = (os.environ.get("EXTRA_CONTAINERS") or "").strip()
-          if not raw or raw == "[]":
-              sys.exit(0)
-          try:
-              entries = json.loads(raw)
-          except json.JSONDecodeError as e:
-              print(f"invalid extra_containers JSON: {e}", file=sys.stderr)
-              sys.exit(1)
-          if not isinstance(entries, list):
-              print("extra_containers must be a JSON array", file=sys.stderr)
-              sys.exit(1)
+          entries = json.loads(os.environ["CONTAINERS_JSON"])
           cluster = os.environ["CLUSTER"]
-          for idx, entry in enumerate(entries):
-              if not isinstance(entry, dict):
-                  print(f"extra_containers entry {idx} is not an object", file=sys.stderr)
-                  sys.exit(1)
-              name = entry.get("name")
-              if not isinstance(name, str) or not name:
-                  print(f"extra_containers entry {idx} missing name", file=sys.stderr)
-                  sys.exit(1)
-              tag = entry.get("image") or f"{name}:local"
+          for entry in entries:
+              if entry.get("role") != "extra":
+                  continue
+              name = entry["name"]
+              tag = entry["image"]
               tar = Path("extra-images") / f"scan-image-{name}" / "image.tar"
               if not tar.is_file():
                   print(f"missing artifact for extra '{name}' at {tar}", file=sys.stderr)

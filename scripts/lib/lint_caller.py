@@ -602,9 +602,12 @@ def manifest_containers(manifest_raw: str, scan_image: str) -> list[dict[str, st
     """Normalized containers list from a contract ci-manifest JSON document.
 
     Contract path (use_ci_contract=true): the manifest is the single source
-    of truth — images[0] is the primary (tagged with the gate's scan_image
-    input), images[1:] are the extras (tagged <name>:local). extra_containers
-    is ignored on this path. Entry shape matches normalized_containers();
+    of truth — images[0] is the primary (always tagged with the gate's
+    scan_image input; a manifest ``image`` key on the primary is ignored),
+    images[1:] are the extras, tagged by their optional ``image`` key or
+    <name>:local when absent (the legacy extra_containers[].image
+    semantics). extra_containers is ignored on this path. Entry shape
+    matches normalized_containers();
     dockerfile/context/target/build_args ride along untouched (the contract
     build path does not consume them — `make ci-build` owns the build).
     Fails closed (SystemExit) on an unusable manifest.
@@ -628,7 +631,11 @@ def manifest_containers(manifest_raw: str, scan_image: str) -> list[dict[str, st
             {
                 "name": name,
                 "role": "primary" if primary else "extra",
-                "image": scan_image if primary else f"{name}:local",
+                "image": (
+                    scan_image
+                    if primary
+                    else str(entry.get("image") or f"{name}:local")
+                ),
                 "dockerfile": str(entry.get("dockerfile") or ""),
                 "context": str(entry.get("context") or "."),
                 "target": str(entry.get("target") or ""),

@@ -25,17 +25,24 @@ path runs exactly as before.
   ```json
   {
     "images": [{"name": "...", "dockerfile": "...", "context": "...",
-                "target": "...", "build_args": "KEY=VALUE\n..."}],
+                "target": "...", "build_args": "KEY=VALUE\n...",
+                "image": "optional-tag:local"}],
     "chart":  {"path": "...", "values": "...", "values_local": "...",
                "release": "...", "namespace": "..."},
     "health": {"path": "...", "port": "...", "workload_match": "..."}
   }
   ```
 
-  `images[0]` is the **primary** — the gate tags it with its `scan_image`
-  input. `images[1:]` are the extras, tagged `<name>:local`. On the contract
-  path the manifest is the single source of truth for the containers list:
-  the `extra_containers` input is **ignored** (one owner, no merge rules).
+  `images[0]` is the **primary** — the gate always tags it with its
+  `scan_image` input (an `image` key on the primary is ignored; `scan_image`
+  stays authoritative because caller lint pins it against your values-local
+  file). `images[1:]` are the extras — tagged by their optional `image` key,
+  or `<name>:local` when absent (the legacy `extra_containers[].image`
+  semantics). **The extras tag must match what your values file schedules
+  with `pullPolicy: Never`** — a mismatch is ErrImageNeverPull at smoke
+  time. On the contract path the manifest is the single source of truth for
+  the containers list, including cluster-smoke's extras kind-load: the
+  `extra_containers` input is **ignored** (one owner, no merge rules).
 - **`ci-build IMAGE=<name>`** must produce the local-daemon tag the gate
   passes as `CI_IMAGE_TAG`. `CI_BUILDER_BASE` / `CI_RUNTIME_BASE` are the
   hardened base images after the gate's registry-login failover resolution

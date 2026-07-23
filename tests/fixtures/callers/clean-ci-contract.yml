@@ -1,0 +1,42 @@
+# Lint fixture: caller opting into the consumer build contract
+# (use_ci_contract: true + contract_file). Clean — the contract checks are
+# WARN-ONLY, and tests/fixtures/consumer/Makefile.ci provides all four
+# targets, so the happy path (notice: active: ci-contract-file) is exercised.
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+
+jobs:
+  security-scan:
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write
+    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@main
+    secrets:
+      CGR_PULL_TOKEN: ${{ secrets.CGR_PULL_TOKEN }}
+      CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
+      IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
+      IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
+    with:
+      scan_image: app:local
+      helm_chart_path: helm/app
+      helm_values_file: helm/app/values.yaml
+      helm_values_local_file: helm/app/values-local.yaml
+      helm_release_name: app-ci
+      cluster_name: app-ci
+      namespace: app-ci
+      require_hardened_bases: true
+      use_ci_contract: true
+      contract_file: Makefile.ci

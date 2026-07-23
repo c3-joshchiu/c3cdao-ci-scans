@@ -456,7 +456,19 @@ ci-scans is public; if it ever goes private, this repo (the callee) must allow
 cross-repo reusable-workflow access (Settings → Actions → Access) before
 consumers can call it.
 
-### H. Note on path efficiency
+### H. Consumer build contract (`use_ci_contract`)
+
+Opt-in, default off. `use_ci_contract: true` moves consumer build knowledge
+(image builds, secctx assertion, smoke prerequisites) out of the gate inputs
+and into a consumer-owned `Makefile.ci` (`contract_file`) exposing
+`ci-manifest` / `ci-build` / `ci-secctx` / `ci-smoke-env`. The bundled
+restricted-PSS assertion stays in-gate on both paths (gate policy). Caller
+lint validates the contract file warn-only (`ci-contract-file`,
+`ci-contract-target`, `ci-contract-manifest` notices). Interface, env vars,
+and the manifest JSON shape: [CI-CONTRACT.md](CI-CONTRACT.md); reference
+implementation: `templates/consumer/Makefile.ci`.
+
+### I. Note on path efficiency
 
 The reusable gate runs all scan jobs on every PR (full gate). Path-based skipping
 (`detect-changes`) can be added later without changing the onboarding model.

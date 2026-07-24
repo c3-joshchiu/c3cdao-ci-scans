@@ -176,33 +176,15 @@ _CONFLUENCE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Core build inputs",
         (
             "scan_image",
-            "dockerfile",
-            "context",
-            "target",
+            "contract_file",
             "builder_image",
             "runtime_image",
-            "runtime_apks",
-            "extra_build_args",
-            "app_path",
-            "app_package",
-            "app_module",
-            "app_port",
-            "extra_containers",
         ),
     ),
     (
-        "Helm and cluster-smoke inputs",
+        "Cluster-smoke inputs",
         (
-            "helm_chart_path",
-            "helm_values_file",
-            "helm_values_local_file",
-            "helm_release_name",
             "cluster_name",
-            "namespace",
-            "secctx_make_target",
-            "health_path",
-            "service_port",
-            "smoke_workload_match",
             "smoke_secrets",
             "image_only",
         ),
@@ -216,10 +198,6 @@ _CONFLUENCE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ironbank_runtime_image",
         ),
     ),
-    (
-        "Consumer build-contract inputs",
-        ("use_ci_contract", "contract_file"),
-    ),
 )
 
 # The workflow declares secrets with `required` only; purpose text mirrors
@@ -230,9 +208,8 @@ _SECRET_PURPOSE = {
         "Phase 1 build - Chainguard (cgr.dev) registry login username."
     ),
     "IRONBANK_TOKEN": (
-        "SonarQube ephemeral + phase 1 / build-extra Iron Bank "
-        "(registry1.dso.mil) login token - runs alongside Chainguard when "
-        "both are set."
+        "SonarQube ephemeral + build Iron Bank (registry1.dso.mil) login "
+        "token - runs alongside Chainguard when both are set."
     ),
     "IRONBANK_USERNAME": (
         "Iron Bank (registry1.dso.mil) login username, paired with IRONBANK_TOKEN."

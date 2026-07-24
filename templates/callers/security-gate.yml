@@ -1,6 +1,12 @@
 # Security Gate caller — copied from c3cdao-ci-scans; you own this file.
 # Edit the `with:` values below per each line's provenance comment for your repo.
 # Keep the structure: explicit secrets map, no concurrency:, job id `security-scan`.
+#
+# Build knowledge lives in your contract makefile (contract_file, default
+# Makefile.ci — start from templates/consumer/Makefile.ci): `make ci-manifest`
+# declares your images, chart, and health probe; ci-build / ci-secctx /
+# ci-smoke-env own the build, secctx assertion, and smoke prerequisites.
+# See docs/CI-CONTRACT.md.
 name: Security Scan
 
 on:
@@ -22,7 +28,7 @@ jobs:
       contents: read
       pull-requests: write
       actions: write
-    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@main  # ← pin a release tag (vX.Y.Z) in prod; @main only during pilot migration
+    uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@main  # ← pin a release tag (vX.Y.Z, e.g. v0.5.0) in prod; @main only during pilot migration
     # Explicit mapping, never the inherit form — inherit only works when caller
     # and callee share an org/enterprise; across owners it silently passes
     # nothing. Explicit values evaluate in the caller's context and always work.
@@ -32,32 +38,12 @@ jobs:
       IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
       IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
     with:
-      scan_image: app:local  # local-daemon tag the image is built and scanned under; must equal the backend image tag in your helm values-local file (pullPolicy: Never pair)
-      dockerfile: containers/backend/Dockerfile  # path to your backend Dockerfile
-      context: .  # Docker build context for the primary image; set to a subdirectory when the Dockerfile expects COPY from that tree
-      target: ""  # Docker build stage for the primary image; empty = last stage. Set when a trailing dev/debug/test stage would otherwise win
-      builder_image: cgr.dev/chainguard/python:latest-dev  # build-stage base image (BUILDER_IMAGE build ARG); must match your Dockerfile's builder base ARG
-      runtime_image: cgr.dev/chainguard/python:latest  # runtime-stage base image (RUNTIME_IMAGE build ARG); must match your Dockerfile's runtime base ARG
-      runtime_apks: ""  # extra runtime packages (RUNTIME_APKS build ARG); set only if your Dockerfile's runtime stage installs apks
-      helm_chart_path: helm/app  # your helm chart directory — helm lint/template target and cluster-smoke install source
-      helm_values_file: helm/app/values.yaml  # your chart's base values file, used by helm lint and template
-      helm_values_local_file: helm/app/values-local.yaml  # your chart's local-overrides values file for cluster-smoke; backend image tag must equal scan_image with pullPolicy: Never
-      helm_release_name: app-ci  # helm release name for template and cluster-smoke install; operator choice
-      cluster_name: app-ci  # kind cluster name cluster-smoke creates and loads the image into; operator choice
-      namespace: app-ci  # kubernetes namespace cluster-smoke deploys into; operator choice
-      secctx_make_target: security-helm-secctx  # your Makefile target asserting pod security contexts; skipped with a notice if absent
-      app_path: apps/app/backend  # path to your backend app directory (APP_PATH build ARG)
-      app_package: app-backend  # backend package dist name (APP_PACKAGE build ARG); must match your backend's package metadata
-      app_module: app.main:app  # ASGI entrypoint as module:attr (APP_MODULE build ARG); must match your backend's app object
-      app_port: "8000"  # container port the backend listens on (APP_PORT build ARG); must match your chart's backend service/probe port
+      scan_image: app:local  # local-daemon tag the primary image is built and scanned under; must equal the backend image tag in your chart's values_local file (pullPolicy: Never pair)
+      contract_file: Makefile.ci  # path of your contract makefile (ci-manifest / ci-build / ci-secctx / ci-smoke-env); start from templates/consumer/Makefile.ci
+      builder_image: cgr.dev/chainguard/python:latest-dev  # build-stage base image, exported to `make ci-build` as CI_BUILDER_BASE (post registry failover)
+      runtime_image: cgr.dev/chainguard/python:latest  # runtime-stage base image, exported to `make ci-build` as CI_RUNTIME_BASE (post registry failover)
       require_hardened_bases: true  # true: fail the build when neither Chainguard nor Iron Bank credentials are configured; false: warn and build with your bases (pilot escape hatch)
-      ironbank_builder_image: ""  # optional Iron Bank replacement for builder_image — only on primary-base failover (CGR absent AND Iron Bank present); empty = builder_image passes through. Iron Bank login itself runs whenever IRONBANK_* is set (can be alongside Chainguard)
-      ironbank_runtime_image: ""  # optional Iron Bank replacement for runtime_image — only on primary-base failover (CGR absent AND Iron Bank present); empty = runtime_image passes through. Iron Bank login itself runs whenever IRONBANK_* is set (can be alongside Chainguard)
-      extra_build_args: ""  # newline-separated KEY=VALUE pairs appended to Docker build-args (use a | block scalar for multiple lines) — for Dockerfiles whose base-image ARGs aren't BUILDER_IMAGE/RUNTIME_IMAGE
-      health_path: /health  # HTTP path cluster-smoke probes on the primary image (GET must return 200); e.g. /healthz, /api/health
-      service_port: "8000"  # port cluster-smoke port-forwards to — the k8s Service's port, which may differ from app_port
-      smoke_workload_match: backend  # case-insensitive substring identifying the backend Deployment/Service in cluster-smoke; set this if your deployment name has no 'backend'
+      ironbank_builder_image: ""  # optional Iron Bank replacement for builder_image — only on primary-base failover (CGR absent AND Iron Bank present); empty = builder_image passes through
+      ironbank_runtime_image: ""  # optional Iron Bank replacement for runtime_image — only on primary-base failover (CGR absent AND Iron Bank present); empty = runtime_image passes through
+      cluster_name: app-ci  # kind cluster name cluster-smoke creates and loads the image into; operator choice
       image_only: false  # true: skip helm-check + cluster-smoke (image build/scan only); keep false for deployable apps
-      extra_containers: ""  # extras to build + image-scan (JSON array). Prefer a multiline '|' block — one object per entry; never a single-line quoted array. "" = none. Optional per-entry target. Shape: docs/INPUTS.md
-      use_ci_contract: false  # true: your repo owns build knowledge via a contract makefile (ci-manifest / ci-build / ci-secctx / ci-smoke-env targets) — see docs/CI-CONTRACT.md; false (default): the gate-owned build inputs above apply
-      contract_file: Makefile.ci  # path of your contract makefile, read only when use_ci_contract is true; start from templates/consumer/Makefile.ci

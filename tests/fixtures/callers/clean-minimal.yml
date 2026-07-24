@@ -1,5 +1,6 @@
-# Lint fixture: single violation — smoke_secrets literals line is not
-# KEY=VALUE shaped (smoke-secrets-literals).
+# Lint fixture: minimal caller — every input left to its contract default
+# (scan_image app:local, contract_file Makefile.ci). Clean — the defaults
+# path through the blocking contract validation is exercised.
 name: Security Scan
 
 on:
@@ -27,17 +28,3 @@ jobs:
       CGR_PULL_USERNAME: ${{ secrets.CGR_PULL_USERNAME }}
       IRONBANK_TOKEN: ${{ secrets.IRONBANK_TOKEN }}
       IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
-    with:
-      scan_image: app:local
-      contract_file: Makefile.ci
-      builder_image: cgr.dev/chainguard/python:latest-dev
-      runtime_image: cgr.dev/chainguard/python:latest
-      require_hardened_bases: true
-      ironbank_builder_image: ""
-      ironbank_runtime_image: ""
-      cluster_name: ${{ vars.CI_CLUSTER_NAME }}
-      image_only: false
-      smoke_secrets: |
-        [
-          {"name": "app-database-url", "literals": "not a key value line"}
-        ]

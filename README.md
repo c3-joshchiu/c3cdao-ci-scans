@@ -8,10 +8,12 @@ Central **monolithic security gate** as a reusable GitHub Actions workflow. Cons
 c3cdao-ci-scans
 ├── .github/workflows/reusable-security-gate.yml   ← unified gate logic (workflow_call)
 ├── templates/callers/security-gate.yml            ← copy-and-own caller template
+├── templates/consumer/Makefile.ci                 ← copy-and-own build contract template
 └── contract/security-gate.schema.json             ← published inputs contract (generated)
 
 consumer repo
-└── .github/workflows/security-gate.yml            ← your copy: triggers + with: + uses: ...@ref
+├── .github/workflows/security-gate.yml            ← your copy: triggers + with: + uses: ...@ref
+└── Makefile.ci                                    ← your build contract: ci-manifest/ci-build/ci-secctx/ci-smoke-env
 ```
 
 **One required branch-protection check:** `security-scan / Security Gate` (the live
@@ -23,16 +25,18 @@ Six steps to a gated repo. Full commands and provenance: [docs/RUNBOOK.md](docs/
 Field reference for every `with:` value: [docs/INPUTS.md](docs/INPUTS.md).
 
 1. **Prerequisites.** `gh` (authenticated), `uv`, and **admin** on the consumer repo
-   (secrets + rulesets). The gate's app-shape settings are defaults, all overridable:
-   single backend image, `GET /health`, port 8000. Add frontend/sidecar images with
-   `extra_containers`, and set `health_path`, `service_port`, `smoke_workload_match`
-   to match your chart and app ([docs/INPUTS.md](docs/INPUTS.md)).
-2. **Copy the caller.**
-   `cp <ci-scans-clone>/templates/callers/security-gate.yml .github/workflows/security-gate.yml`.
-   You own it from here — no tooling ever rewrites it.
-3. **Edit `with:`.** Each line carries an inline provenance comment (Dockerfile ARG,
-   helm values, package metadata, or operator choice). Keep the job id `security-scan` —
-   renaming it silently un-gates merges. Pass secrets explicitly, never `inherit`.
+   (secrets + rulesets). Your build knowledge lives in your contract makefile:
+   `make ci-manifest` declares images, chart, and health probe; `ci-build` /
+   `ci-secctx` / `ci-smoke-env` own the build, secctx assertion, and smoke
+   prerequisites ([docs/CI-CONTRACT.md](docs/CI-CONTRACT.md)).
+2. **Copy the caller and the contract.**
+   `cp <ci-scans-clone>/templates/callers/security-gate.yml .github/workflows/security-gate.yml`
+   and `cp <ci-scans-clone>/templates/consumer/Makefile.ci Makefile.ci`.
+   You own both from here — no tooling ever rewrites them.
+3. **Edit `Makefile.ci` and `with:`.** The makefile's variable block describes your
+   images, chart, and health probe; each caller `with:` line carries an inline
+   provenance comment. Keep the job id `security-scan` — renaming it silently
+   un-gates merges. Pass secrets explicitly, never `inherit`.
 4. **Set the four secrets.** `CGR_PULL_TOKEN`, `CGR_PULL_USERNAME`, `IRONBANK_TOKEN`,
    `IRONBANK_USERNAME` — via `gh secret set --repo <owner>/<repo>` or Settings → Secrets
    and variables → Actions → New repository secret.
@@ -52,8 +56,9 @@ Field reference for every `with:` value: [docs/INPUTS.md](docs/INPUTS.md).
 
 The gate's first job (`caller-lint`) is a **fail-closed configuration pre-flight**: it
 validates your copied caller's `with:` inputs, secret mappings, and structure against the
-published contract. Nothing scans until it passes — it is not a security scanner. Rule ids
-and local invocation: [docs/RUNBOOK.md](docs/RUNBOOK.md).
+published contract — including blocking validation of your contract makefile and its
+`ci-manifest` output. Nothing scans until it passes — it is not a security scanner.
+Rule ids and local invocation: [docs/RUNBOOK.md](docs/RUNBOOK.md).
 
 ## Pin policy
 
@@ -66,4 +71,6 @@ acceptable only during the pilot migration window.
   model, caller-lint rule ids, hardened-base login (dual registry), scan boundary /
   proxy-scan posture, and maintenance.
 - [docs/INPUTS.md](docs/INPUTS.md) — every `with:` field with type, default, and provenance.
+- [docs/CI-CONTRACT.md](docs/CI-CONTRACT.md) — the consumer build contract: target
+  interface, env vars, and the `ci-manifest` JSON shape.
 - [docs/REQUIREMENTS-MAP.md](docs/REQUIREMENTS-MAP.md) — gate jobs mapped to the CI spec.

@@ -34,14 +34,17 @@ all is reference material: see
 
 The gate assumes this app shape:
 
-- the app serves `GET /health` (cluster-smoke probes it after the helm install)
+- the app serves the health route your manifest declares (`health.path`,
+  default `GET /health` — cluster-smoke probes it after the helm install)
 - a helm deploy of the primary backend image (built, scanned, kind-loaded, and
-  installed). Add `extra_containers` for self-authored, gate-reachable
-  frontend/sidecar images — those tags are also kind-loaded for smoke when
-  built. Pass `smoke_secrets` when the chart requires Secrets beyond the
-  default `app-database-url` helper
-- an ASGI backend describable by the `app_*` inputs (`app_path`, `app_package`,
-  `app_module`, `app_port`)
+  installed). Declare self-authored, gate-reachable frontend/sidecar images as
+  extra `ci-manifest` `images[]` entries — those tags are also kind-loaded for
+  smoke when built. Pass `smoke_secrets` when the chart requires Secrets beyond
+  what your `make ci-smoke-env` target provisions
+- a consumer build contract makefile (`Makefile.ci`, from
+  [`templates/consumer/Makefile.ci`](../templates/consumer/Makefile.ci))
+  exposing `ci-manifest` / `ci-build` / `ci-secctx` / `ci-smoke-env` — the
+  gate's only build path, see [CI-CONTRACT.md](CI-CONTRACT.md)
 
 Tooling: `gh` (authenticated), `uv`, and **admin** on the consumer repo (secrets
 and rulesets).
@@ -55,12 +58,17 @@ the operator holds admin, and `gh`/`uv` are available on the operator laptop.
 cd <consumer-repo>
 mkdir -p .github/workflows
 cp <ci-scans-clone>/templates/callers/security-gate.yml .github/workflows/security-gate.yml
+cp <ci-scans-clone>/templates/consumer/Makefile.ci Makefile.ci
 ```
 
-You own this file from here — no tooling ever rewrites it.
+You own both files from here — no tooling ever rewrites them. `Makefile.ci` is
+the consumer build contract (`ci-manifest` / `ci-build` / `ci-secctx` /
+`ci-smoke-env`); edit its variable block so `ci-manifest` describes your
+images, chart, and health probe, and `ci-build` builds your Dockerfile(s) —
+see [CI-CONTRACT.md](CI-CONTRACT.md).
 
-**You should see:** `.github/workflows/security-gate.yml` in the consumer repo,
-byte-identical to the template, committed as its own commit.
+**You should see:** `.github/workflows/security-gate.yml` and `Makefile.ci` in
+the consumer repo, committed as their own commit.
 
 ## 2. Edit `with:` and pin the version — commit 2 (consumer)
 
@@ -84,7 +92,7 @@ The template ships with `@main` for the pilot window. In production, pin a
 release tag:
 
 ```yaml
-uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.1.0
+uses: c3-joshchiu/c3cdao-ci-scans/.github/workflows/reusable-security-gate.yml@v0.5.0
 ```
 
 `@main` is acceptable only during the pilot migration window.
@@ -137,11 +145,11 @@ variables → Actions → New repository secret.
 | Secret | Job |
 |--------|-----|
 | `CGR_PULL_TOKEN`, `CGR_PULL_USERNAME` | Phase 1 build — Chainguard (`cgr.dev`) login |
-| `IRONBANK_TOKEN`, `IRONBANK_USERNAME` | SonarQube ephemeral + Phase 1 / build-extra Iron Bank (`registry1.dso.mil`) login — can run **alongside** Chainguard when both are set |
+| `IRONBANK_TOKEN`, `IRONBANK_USERNAME` | SonarQube ephemeral + build Iron Bank (`registry1.dso.mil`) login — can run **alongside** Chainguard when both are set |
 
 How the two logins interact (independent logins, primary-base image swap, the
 `require_hardened_bases` fail-closed posture) is reference material: see
-[appendix B](#b-hardened-base-registry-login-matrix-phase1-build--build-extra).
+[appendix B](#b-hardened-base-registry-login-matrix-build).
 
 **You should see:** all four names listed under the repo's Actions secrets
 (Settings → Secrets and variables → Actions).
@@ -333,11 +341,11 @@ in CI, and none of it renders or rewrites the caller.
 (the `contract-extract` hook); only the config loader supports
 `setup-ruleset.sh`.
 
-### B. Hardened-base registry login matrix (phase1-build + build-extra)
+### B. Hardened-base registry login matrix (build)
 
 Logins are **independent** (docker stores credentials per registry host). Setting
 both `CGR_PULL_*` and `IRONBANK_*` authenticates **both** in one run — required
-for mixed-base repos (e.g. Chainguard primary + Iron Bank `extra_containers`).
+for mixed-base repos (e.g. Chainguard primary + Iron Bank extras in the manifest).
 
 1. `CGR_PULL_TOKEN` set → login `cgr.dev`.
 2. `IRONBANK_TOKEN` set → login `registry1.dso.mil` (does **not** require CGR to
@@ -358,17 +366,17 @@ image uses a private mirror or entitlement the runner cannot reach, OS-layer /
 approved-image attestation is **out of scope** for this gate — keep that in the
 consumer IL5 / Game Warden (or equivalent) pipeline.
 
-- Prefer `extra_containers` for **self-authored, gate-reachable** images only.
+- Declare manifest extras for **self-authored, gate-reachable** images only.
 - When `require_hardened_bases: false` (pilot escape hatch / public substitutes),
-  phase1-build, build-extra, Vulnerability Scan, and Vulnerability Scan extra
-  emit a **proxy-scan** warning and job-summary label. Green ≠ approved prod
-  image clean.
+  every build and Vulnerability Scan leg emits a **proxy-scan** warning and
+  job-summary label. Green ≠ approved prod image clean.
 
-Consumers without a root `Makefile`/`security-helm-secctx` target get the gate's
-bundled restricted-PSS assertion in helm-check, and vuln-scan defaults empty
+Consumers without a `ci-secctx` contract target get the gate's
+bundled restricted-PSS assertion in helm-check (it runs regardless — gate
+policy), and vuln-scan defaults empty
 `.trivyignore`/`.grype.yaml` when the consumer doesn't carry them.
-`helm-check` owns runner `uv` before either the consumer make or bundled PSS
-path; Makefile targets must not assume the caller preinstalled it.
+`helm-check` owns runner `uv` before either the consumer `ci-secctx` or bundled
+PSS step; Makefile targets must not assume the caller preinstalled it.
 
 ### C. Caller-lint rule ids and notices
 
@@ -377,22 +385,20 @@ closed if neither Chainguard (`CGR_PULL_*`) nor Iron Bank (`IRONBANK_*`)
 complete pull credential pairs are present, so docker/kind never start on a
 missing-credentials run. Rule ids:
 `no-secrets-inherit`, `no-caller-concurrency`, `unknown-input`, `type-mismatch`,
-`missing-secret-map`, `image-values-mismatch`, `unreadable-caller`, plus the
-`extra_containers` entry validators `extra-containers-json`,
-`extra-containers-name`, `extra-containers-duplicate`,
-`extra-containers-dockerfile`, `extra-containers-template-path`,
-`extra-containers-target`, `extra-containers-build-arg`, plus the
-`smoke_secrets` validators `smoke-secrets-json`, `smoke-secrets-name`,
-`smoke-secrets-duplicate`, `smoke-secrets-literals`. Non-failing style notices
-`extra-containers-format` / `smoke-secrets-format` fire when an array is packed
-onto one quoted line — prefer a multiline YAML `|` block (see
-[INPUTS.md](INPUTS.md)). Rules skipped for a stated reason announce on stderr
+`missing-secret-map`, `image-values-mismatch`, `unreadable-caller`, the
+**blocking** contract validators `ci-contract-file`, `ci-contract-target`,
+`ci-contract-manifest` (a missing optional `ci-secctx` target is a notice),
+plus the `smoke_secrets` validators `smoke-secrets-json`, `smoke-secrets-name`,
+`smoke-secrets-duplicate`, `smoke-secrets-literals`. The non-failing style
+notice `smoke-secrets-format` fires when an array is packed onto one quoted
+line — prefer a multiline YAML `|` block (see [INPUTS.md](INPUTS.md)). Rules
+skipped for a stated reason announce on stderr
 (`notice: skip: image-values-mismatch: --consumer-root not given`); with a
-consumer checkout supplied, the values-file rule announces
-`notice: active: image-values-mismatch: checked <path>`. The check parses
-values-local as YAML: a string `image` equal to `scan_image`, or
-`repository` + `tag` that join to it, both pass; a comment-only mention does
-not.
+consumer checkout supplied, file-touching rules announce
+`notice: active: <rule>: checked <path>`. The image-values rule reads the
+values-local path from the manifest's `chart.values_local` and parses it as
+YAML: a string `image` equal to `scan_image`, or `repository` + `tag` that
+join to it, both pass; a comment-only mention does not.
 
 ### D. Job order and fail-fast (Actions minutes)
 
@@ -400,10 +406,9 @@ Gate jobs are ordered so cheap failures stop expensive work from starting:
 
 1. **`caller-lint`** — caller contract + (when `require_hardened_bases`) hardened-registry secret presence.
 2. **`helm-check`** (unless `image_only`) — helm lint/template + restricted PSS — in parallel with SAST/secrets-scan.
-3. **`phase1-build` / `build-extra`** — docker image builds — **need** successful `caller-lint` and, when helm runs, successful `helm-check`. A PSS failure does not start multi-minute image builds.
-4. **`cluster-smoke` / `vuln-scan`** — need a successful primary image build;
-   cluster-smoke also needs `build-extra` when `extra_containers` is set (skipped
-   extras leave smoke free to run after phase1 alone).
+3. **`build`** — `make ci-build` per manifest image (matrixed) — **needs** successful `caller-lint` and, when helm runs, successful `helm-check`. A PSS failure does not start multi-minute image builds.
+4. **`cluster-smoke` / `image-scan`** — need a successful `build` (all matrix
+   legs, primary + extras).
 
 This is DAG `needs:` wiring, not in-job cancellation. Prior runs on the same ref are still cancelled by workflow `concurrency:`.
 
@@ -426,7 +431,7 @@ verify with SecondFront before relying on it.)
 ### F. Consumer onboarding blockers (checklist)
 
 Gate product gaps for full-cluster smoke are tracked as [#23](https://github.com/c3-joshchiu/c3cdao-ci-scans/issues/23)
-(extra_containers kind-load) and [#24](https://github.com/c3-joshchiu/c3cdao-ci-scans/issues/24)
+(manifest-extras kind-load) and [#24](https://github.com/c3-joshchiu/c3cdao-ci-scans/issues/24)
 (smoke Secrets contract). **Consumer-owned** readiness gaps that repeatedly turn
 Security Scan red — restricted PSS on charts, hardened-base Dockerfiles, registry
 pull-secret pairs, and the canary-before-fleet process — live in
@@ -456,17 +461,19 @@ ci-scans is public; if it ever goes private, this repo (the callee) must allow
 cross-repo reusable-workflow access (Settings → Actions → Access) before
 consumers can call it.
 
-### H. Consumer build contract (`use_ci_contract`)
+### H. Consumer build contract
 
-Opt-in, default off. `use_ci_contract: true` moves consumer build knowledge
-(image builds, secctx assertion, smoke prerequisites) out of the gate inputs
-and into a consumer-owned `Makefile.ci` (`contract_file`) exposing
-`ci-manifest` / `ci-build` / `ci-secctx` / `ci-smoke-env`. The bundled
-restricted-PSS assertion stays in-gate on both paths (gate policy). Caller
-lint validates the contract file warn-only (`ci-contract-file`,
-`ci-contract-target`, `ci-contract-manifest` notices). Interface, env vars,
-and the manifest JSON shape: [CI-CONTRACT.md](CI-CONTRACT.md); reference
-implementation: `templates/consumer/Makefile.ci`.
+The only build path (since v0.5.0). Consumer build knowledge (image builds,
+secctx assertion, smoke prerequisites, chart/health metadata) lives in a
+consumer-owned `Makefile.ci` (`contract_file`) exposing `ci-manifest` /
+`ci-build` / `ci-secctx` / `ci-smoke-env`; `make ci-manifest` is the single
+source of truth for the containers list and chart/health sections. The
+bundled restricted-PSS assertion stays in-gate (gate policy). Caller lint
+validates the contract file **blocking** (`ci-contract-file`,
+`ci-contract-target`, `ci-contract-manifest`; a missing optional `ci-secctx`
+is a notice). Interface, env vars, and the manifest JSON shape:
+[CI-CONTRACT.md](CI-CONTRACT.md); reference implementation:
+`templates/consumer/Makefile.ci`.
 
 ### I. Note on path efficiency
 

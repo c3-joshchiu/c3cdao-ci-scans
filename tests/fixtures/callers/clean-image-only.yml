@@ -1,5 +1,5 @@
-# Lint fixture: image_only skips image-values-mismatch even when the
-# values-local path is absent under the consumer root.
+# Lint fixture: image_only skips image-values-mismatch even though the
+# contract manifest's chart.values_local is still validated for shape.
 name: Security Scan
 
 on:
@@ -29,23 +29,11 @@ jobs:
       IRONBANK_USERNAME: ${{ secrets.IRONBANK_USERNAME }}
     with:
       scan_image: app:local
-      dockerfile: containers/backend/Dockerfile
+      contract_file: Makefile.ci
       builder_image: cgr.dev/chainguard/python:latest-dev
       runtime_image: cgr.dev/chainguard/python:latest
-      runtime_apks: ""
-      helm_chart_path: helm/app
-      helm_values_file: helm/app/values.yaml
-      helm_values_local_file: helm/app/does-not-exist.yaml
-      helm_release_name: app-ci
-      cluster_name: app-ci
-      namespace: ${{ vars.CI_NAMESPACE }}
-      secctx_make_target: security-helm-secctx
-      app_path: apps/app/backend
-      app_package: app-backend
-      app_module: app.main:app
-      app_port: "8000"
       require_hardened_bases: true
       ironbank_builder_image: ""
       ironbank_runtime_image: ""
-      extra_build_args: ""
+      cluster_name: ${{ vars.CI_CLUSTER_NAME }}
       image_only: true

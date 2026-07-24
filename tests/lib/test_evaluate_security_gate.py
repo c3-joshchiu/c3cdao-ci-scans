@@ -75,7 +75,7 @@ def test_smoke_continue_on_error_false_green():
 
 def test_matrixed_build_failure_blocks():
     # Extras are legs of the matrixed build job: any failed leg fails the
-    # whole job, so a single result covers the former build-extra membership.
+    # whole job, so a single result covers every extra.
     needs = _needs(
         {
             "caller-lint": "success",

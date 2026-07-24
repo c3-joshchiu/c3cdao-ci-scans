@@ -294,7 +294,7 @@ The enforcement model has two knobs:
 - **Ruleset enable** (per-consumer): `setup-ruleset.sh --enable` (step 6) makes
   `security-scan / Security Gate` a required check on the target branch.
 - **`SECURITY_SCAN_BLOCKING` repo variable** (gate-internal): hard-fail posture
-  for cluster-smoke and vuln-scan. Until it is `true` they warn instead of
+  for cluster-smoke and image-scan. Until it is `true` they warn instead of
   failing; a skipped/cancelled/errored blocking job still fails the gate.
   Flipping it to `true` is the **final** acceptance step — see
   [REQUIREMENTS-MAP.md](REQUIREMENTS-MAP.md).
@@ -304,7 +304,7 @@ gh variable set SECURITY_SCAN_BLOCKING --body true --repo <owner>/<repo>
 ```
 
 **You should see:** the repo variable set to `true`, and subsequent gate runs
-hard-failing (not warning) on cluster-smoke / vuln-scan findings.
+hard-failing (not warning) on cluster-smoke / image-scan findings.
 
 ## Migrating from modular scans (consumer + operator)
 
@@ -373,7 +373,7 @@ consumer IL5 / Game Warden (or equivalent) pipeline.
 
 Consumers without a `ci-secctx` contract target get the gate's
 bundled restricted-PSS assertion in helm-check (it runs regardless — gate
-policy), and vuln-scan defaults empty
+policy), and image-scan defaults empty
 `.trivyignore`/`.grype.yaml` when the consumer doesn't carry them.
 `helm-check` owns runner `uv` before either the consumer `ci-secctx` or bundled
 PSS step; Makefile targets must not assume the caller preinstalled it.

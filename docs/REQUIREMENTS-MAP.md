@@ -26,7 +26,7 @@ Source of truth for the job list is
 
 These are intentional posture choices, not gaps to remediate now.
 
-### Warn-only SAST and advisory cluster-smoke/vuln-scan are a verification ramp
+### Warn-only SAST and advisory cluster-smoke/image-scan are a verification ramp
 
 Semgrep and SonarQube run warn-only, and cluster-smoke and image-scan stay
 advisory, until the operator sets the `SECURITY_SCAN_BLOCKING=true` repo

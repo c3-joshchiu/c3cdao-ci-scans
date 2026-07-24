@@ -993,8 +993,7 @@ jobs:
   # the shared image-side scans (Trivy image, Grype image, Grype image-SBOM)
   # against its leg's artifacts; the primary leg additionally generates the
   # whole-repo source SBOM and runs the source-SBOM Trivy/Grype scans (run
-  # once, exactly as the pre-matrix vuln-scan did). Same SECURITY_SCAN_BLOCKING
-  # exit-code semantics on every leg.
+  # once). Same SECURITY_SCAN_BLOCKING exit-code semantics on every leg.
   # --------------------------------------------------------------------------
   image-scan:
     name: Vulnerability Scan — ${{ matrix.container.name }} (Trivy + Grype)

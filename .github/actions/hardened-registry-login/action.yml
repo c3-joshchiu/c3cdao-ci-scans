@@ -1,26 +1,26 @@
 # Hardened-base login: authenticate to Chainguard (cgr.dev) when CGR_PULL_*
 # is set AND to Iron Bank (registry1.dso.mil) when IRONBANK_* is set — both
 # sessions can be active at once, so a repo whose images span both registries
-# (e.g. a Chainguard primary with Iron Bank extra_containers) builds in a
-# single run. If only Iron Bank is configured, the primary's builder/runtime
+# (e.g. a Chainguard primary with Iron Bank extras in the manifest) builds in
+# a single run. If only Iron Bank is configured, the primary's builder/runtime
 # optionally swap to the ironbank_* image inputs. With neither,
 # require_hardened_bases decides: fail (default) or warn and build on the
 # consumer-specified bases.
 #
-# FAILOVER SEMANTICS (must stay identical across every consumer job):
-# build-extra intentionally inherits the primary's failover behavior
-# bit-for-bit — extras legs resolve builder_image/runtime_image outputs with
-# the exact same CGR-absent/Iron-Bank-present swap as phase1-build, even
+# FAILOVER SEMANTICS (must stay identical across every build matrix leg):
+# extras legs intentionally inherit the primary's failover behavior
+# bit-for-bit — they resolve builder_image/runtime_image outputs with the
+# exact same CGR-absent/Iron-Bank-present swap as the primary leg, even
 # though extras carry their own base args via matrix build_args. Do not
-# specialize this action per job.
+# specialize this action per leg.
 name: Login to hardened base registries
 description: >-
   Docker-login to Chainguard (cgr.dev) and/or Iron Bank when their credential
   pairs are present (with retry), resolve the effective builder/runtime base
   images (Iron Bank failover only when CGR is absent and Iron Bank present),
   and fail or warn per require-hardened-bases when neither credential exists.
-  The primary-base failover behavior is shared verbatim by phase1-build and
-  build-extra (extras inherit the primary failover) — preserve bit-for-bit.
+  The primary-base failover behavior is shared verbatim by every build matrix
+  leg (extras inherit the primary failover) — preserve bit-for-bit.
 inputs:
   cgr-pull-token:
     description: "Chainguard pull token (secrets.CGR_PULL_TOKEN); empty when unset."

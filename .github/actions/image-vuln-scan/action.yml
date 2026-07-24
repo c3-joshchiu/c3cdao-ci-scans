@@ -1,7 +1,7 @@
-# Image-side vulnerability scanning shared by vuln-scan and vuln-scan-extra:
+# Image-side vulnerability scanning shared by every image-scan matrix leg:
 # default scanner configs, docker-load the built image artifact, Trivy image
 # scan, Grype image scan, Grype image-SBOM scan. Source-SBOM generation and
-# source scans stay in the primary vuln-scan job (whole-repo, run once).
+# source scans stay in the primary image-scan leg (whole-repo, run once).
 # Same SECURITY_SCAN_BLOCKING exit-code semantics in every consumer — the
 # caller passes vars.SECURITY_SCAN_BLOCKING through blocking.
 name: Image vulnerability scan (Trivy + Grype)

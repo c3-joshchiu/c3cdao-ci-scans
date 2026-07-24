@@ -17,8 +17,8 @@ from typing import Any
 
 def blocking_jobs(image_only: bool) -> list[str]:
     # build and image-scan are matrixed over the normalized containers list
-    # (primary + extras): the job fails when any leg fails, so the former
-    # conditional build-extra/vuln-scan-extra membership is subsumed.
+    # (primary + extras): the job fails when any leg fails, so extras are
+    # covered without per-extra job entries.
     blocking = ["caller-lint", "build", "secrets-scan", "image-scan"]
     if not image_only:
         blocking[3:3] = ["helm-check", "cluster-smoke"]
